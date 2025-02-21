@@ -27,7 +27,7 @@ use tokio::{
 use util::Subscriptions;
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind, Wired},
     standard_icd::{GetAllSchemaDataTopic, GetAllSchemasEndpoint, OwnedSchemaData},
     Endpoint, Key, Topic, TopicDirection,
 };
@@ -174,23 +174,25 @@ pub trait WireSpawn: 'static {
 ///
 /// 1. With raw USB Bulk transfers: [`HostClient::new_raw_nusb()`] (**recommended**)
 /// 2. With cobs CDC-ACM transfers: [`HostClient::new_serial_cobs()`]
-pub struct HostClient<WireErr> {
-    ctx: Arc<HostContext>,
-    out: mpsc::Sender<RpcFrame>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
+pub struct HostClient<WireErr, Mode: HeaderMode> {
+    ctx: Arc<HostContext<Mode>>,
+    out: mpsc::Sender<RpcFrame<Mode>>,
+    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
     err_key: Key,
     stopper: Stopper,
     seq_kind: VarSeqKind,
+    _hm: PhantomData<Mode>,
     _pd: PhantomData<fn() -> WireErr>,
 }
 
 /// # Constructor Methods
-impl<WireErr> HostClient<WireErr>
+impl<WireErr, Mode> HostClient<WireErr, Mode>
 where
     WireErr: DeserializeOwned + Schema,
+    Mode: HeaderMode,
 {
     /// Private method for creating internal context
-    pub(crate) fn new_manual_priv(config: &HostClientConfig) -> (Self, WireContext) {
+    pub(crate) fn new_manual_priv(config: &HostClientConfig) -> (Self, WireContext<Mode>) {
         let (tx_pc, rx_pc) = tokio::sync::mpsc::channel(config.outgoing_depth);
 
         let ctx = Arc::new(HostContext {
@@ -202,11 +204,12 @@ where
 
         let err_key = Key::for_path::<WireErr>(config.err_uri_path);
 
-        let me = HostClient {
+        let me = HostClient::<WireErr, Mode> {
             ctx: ctx.clone(),
             out: tx_pc,
             err_key,
             _pd: PhantomData,
+            _hm: PhantomData,
             subscriptions: Arc::new(Mutex::new(Subscriptions::default())),
             stopper: Stopper::new(),
             seq_kind: config.seq_kind,
@@ -215,6 +218,7 @@ where
         let wire = WireContext {
             outgoing: rx_pc,
             incoming: ctx,
+            _hm: PhantomData,
         };
 
         (me, wire)
@@ -243,7 +247,7 @@ impl<WireErr> From<UnableToFindType> for SchemaError<WireErr> {
 }
 
 /// # Interface Methods
-impl<WireErr> HostClient<WireErr>
+impl<WireErr> HostClient<WireErr, Wired>
 where
     WireErr: DeserializeOwned + Schema,
 {
@@ -335,7 +339,7 @@ where
         let seq_no = self.ctx.seq.fetch_add(1, Ordering::Relaxed);
 
         let msg = postcard::to_stdvec(&t).expect("Allocations should not ever fail");
-        let frame = RpcFrame {
+        let frame = RpcFrame::<Wired> {
             // NOTE: send_resp_raw automatically shrinks down key and sequence
             // kinds to the appropriate amount
             header: VarHeader {
@@ -343,6 +347,7 @@ where
                 seq_no: VarSeq::Seq4(seq_no),
             },
             body: msg,
+            _hm: PhantomData,
         };
         let frame = self.send_resp_raw(frame, E::RESP_KEY).await?;
         let r = postcard::from_bytes::<E::Response>(&frame.body)?;
@@ -353,9 +358,9 @@ where
     /// Ser/De automatically
     pub async fn send_resp_raw(
         &self,
-        mut rqst: RpcFrame,
+        mut rqst: RpcFrame<Wired>,
         resp_key: Key,
-    ) -> Result<RpcFrame, HostErr<WireErr>> {
+    ) -> Result<RpcFrame<Wired>, HostErr<WireErr>> {
         let cancel_fut = self.stopper.wait_stopped();
         let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
         rqst.header.key.shrink_to(kkind);
@@ -413,7 +418,7 @@ where
                 if hdr.key.kind() != kkind {
                     *self.ctx.kkind.write().unwrap() = hdr.key.kind();
                 }
-                Ok(RpcFrame { header: hdr, body: resp })
+                Ok(RpcFrame::<Wired> { header: hdr, body: resp, _hm: PhantomData })
             },
             e = err_resp => {
                 let (hdr, resp) = e?;
@@ -435,18 +440,19 @@ where
         T::Message: Serialize,
     {
         let smsg = postcard::to_stdvec(msg).expect("alloc should never fail");
-        let frame = RpcFrame {
+        let frame = RpcFrame::<Wired> {
             header: VarHeader {
                 key: VarKey::Key8(T::TOPIC_KEY),
                 seq_no,
             },
             body: smsg,
+            _hm: PhantomData,
         };
         self.publish_raw(frame).await
     }
 
     /// Publish the given raw frame
-    pub async fn publish_raw(&self, mut frame: RpcFrame) -> Result<(), IoClosed> {
+    pub async fn publish_raw(&self, mut frame: RpcFrame<Wired>) -> Result<(), IoClosed> {
         let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
         frame.header.key.shrink_to(kkind);
 
@@ -471,7 +477,7 @@ where
     pub async fn subscribe_multi<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<MultiSubscription<T::Message>, IoClosed>
+    ) -> Result<MultiSubscription<T::Message, Wired>, IoClosed>
     where
         T::Message: DeserializeOwned,
     {
@@ -487,7 +493,7 @@ where
     async fn subscribe_multi_inner<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<MultiSubscription<T::Message>, IoClosed>
+    ) -> Result<MultiSubscription<T::Message, Wired>, IoClosed>
     where
         T::Message: DeserializeOwned,
     {
@@ -511,6 +517,7 @@ where
         Ok(MultiSubscription {
             rx,
             _pd: PhantomData,
+            _hm: PhantomData,
         })
     }
 
@@ -519,7 +526,7 @@ where
         &self,
         key: Key,
         depth: usize,
-    ) -> Result<RawMultiSubscription, IoClosed> {
+    ) -> Result<RawMultiSubscription<Wired>, IoClosed> {
         let cancel_fut = self.stopper.wait_stopped();
         let operate_fut = self.subscribe_multi_inner_raw(key, depth);
         select! {
@@ -533,7 +540,7 @@ where
         &self,
         key: Key,
         depth: usize,
-    ) -> Result<RawMultiSubscription, IoClosed> {
+    ) -> Result<RawMultiSubscription<Wired>, IoClosed> {
         let rx = {
             let mut guard = self.subscriptions.lock().await;
             if guard.stopped {
@@ -547,7 +554,10 @@ where
                 rx
             }
         };
-        Ok(RawMultiSubscription { rx })
+        Ok(RawMultiSubscription {
+            rx,
+            _hm: PhantomData,
+        })
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -567,7 +577,7 @@ where
     pub async fn subscribe<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<Subscription<T::Message>, IoClosed>
+    ) -> Result<Subscription<T::Message, Wired>, IoClosed>
     where
         T::Message: DeserializeOwned,
     {
@@ -583,7 +593,7 @@ where
     async fn subscribe_inner<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<Subscription<T::Message>, IoClosed>
+    ) -> Result<Subscription<T::Message, Wired>, IoClosed>
     where
         T::Message: DeserializeOwned,
     {
@@ -609,6 +619,7 @@ where
         Ok(Subscription {
             rx,
             _pd: PhantomData,
+            _hm: PhantomData,
         })
     }
 
@@ -620,7 +631,11 @@ where
     ///
     /// Returns an Error if the I/O worker is closed.
     #[deprecated = "In future versions, `subscribe_raw` will be removed. Use `subscribe_multi_raw` or `subscribe_exclusive_raw` instead."]
-    pub async fn subscribe_raw(&self, key: Key, depth: usize) -> Result<RawSubscription, IoClosed> {
+    pub async fn subscribe_raw(
+        &self,
+        key: Key,
+        depth: usize,
+    ) -> Result<RawSubscription<Wired>, IoClosed> {
         let cancel_fut = self.stopper.wait_stopped();
         let operate_fut = self.subscribe_inner_raw(key, depth);
         select! {
@@ -634,7 +649,7 @@ where
         &self,
         key: Key,
         depth: usize,
-    ) -> Result<RawSubscription, IoClosed> {
+    ) -> Result<RawSubscription<Wired>, IoClosed> {
         let (tx, rx) = tokio::sync::mpsc::channel(depth);
         {
             let mut guard = self.subscriptions.lock().await;
@@ -650,7 +665,10 @@ where
                 guard.exclusive_list.push((key, tx));
             }
         }
-        Ok(RawSubscription { rx })
+        Ok(RawSubscription {
+            rx,
+            _hm: PhantomData,
+        })
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -668,7 +686,7 @@ where
     pub async fn subscribe_exclusive<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<Subscription<T::Message>, SubscribeError>
+    ) -> Result<Subscription<T::Message, Wired>, SubscribeError>
     where
         T::Message: DeserializeOwned,
     {
@@ -684,7 +702,7 @@ where
     async fn subscribe_inner_exclusive<T: Topic>(
         &self,
         depth: usize,
-    ) -> Result<Subscription<T::Message>, SubscribeError>
+    ) -> Result<Subscription<T::Message, Wired>, SubscribeError>
     where
         T::Message: DeserializeOwned,
     {
@@ -710,6 +728,7 @@ where
         Ok(Subscription {
             rx,
             _pd: PhantomData,
+            _hm: PhantomData,
         })
     }
 
@@ -724,7 +743,7 @@ where
         &self,
         key: Key,
         depth: usize,
-    ) -> Result<RawSubscription, SubscribeError> {
+    ) -> Result<RawSubscription<Wired>, SubscribeError> {
         let cancel_fut = self.stopper.wait_stopped();
         let operate_fut = self.subscribe_inner_exclusive_raw(key, depth);
         select! {
@@ -738,7 +757,7 @@ where
         &self,
         key: Key,
         depth: usize,
-    ) -> Result<RawSubscription, SubscribeError> {
+    ) -> Result<RawSubscription<Wired>, SubscribeError> {
         let (tx, rx) = tokio::sync::mpsc::channel(depth);
         {
             let mut guard = self.subscriptions.lock().await;
@@ -754,7 +773,10 @@ where
                 guard.exclusive_list.push((key, tx));
             }
         }
-        Ok(RawSubscription { rx })
+        Ok(RawSubscription {
+            rx,
+            _hm: PhantomData,
+        })
     }
 
     /// Permanently close the connection to the client
@@ -781,26 +803,28 @@ where
 
 /// Like Subscription, but receives Raw frames that are not
 /// automatically deserialized
-pub struct RawSubscription {
-    rx: mpsc::Receiver<RpcFrame>,
+pub struct RawSubscription<Mode: HeaderMode> {
+    rx: mpsc::Receiver<RpcFrame<Mode>>,
+    _hm: PhantomData<Mode>,
 }
 
-impl RawSubscription {
+impl RawSubscription<Wired> {
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Option<RpcFrame> {
+    pub async fn recv(&mut self) -> Option<RpcFrame<Wired>> {
         self.rx.recv().await
     }
 }
 
 /// A structure that represents a subscription to the given topic
-pub struct Subscription<M> {
-    rx: mpsc::Receiver<RpcFrame>,
+pub struct Subscription<M, Mode: HeaderMode> {
+    rx: mpsc::Receiver<RpcFrame<Mode>>,
     _pd: PhantomData<M>,
+    _hm: PhantomData<Mode>,
 }
 
-impl<M> Subscription<M>
+impl<M> Subscription<M, Wired>
 where
     M: DeserializeOwned,
 {
@@ -819,15 +843,16 @@ where
 
 /// Like MultiSubscription, but receives Raw frames that are not
 /// automatically deserialized
-pub struct RawMultiSubscription {
-    rx: broadcast::Receiver<RpcFrame>,
+pub struct RawMultiSubscription<Mode: HeaderMode> {
+    rx: broadcast::Receiver<RpcFrame<Mode>>,
+    _hm: PhantomData<Mode>,
 }
 
-impl RawMultiSubscription {
+impl RawMultiSubscription<Wired> {
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Result<RpcFrame, MultiSubRxError> {
+    pub async fn recv(&mut self) -> Result<RpcFrame<Wired>, MultiSubRxError> {
         match self.rx.recv().await {
             Ok(f) => Ok(f),
             Err(broadcast::error::RecvError::Closed) => Err(MultiSubRxError::IoClosed),
@@ -837,9 +862,10 @@ impl RawMultiSubscription {
 }
 
 /// A structure that represents a subscription to the given topic
-pub struct MultiSubscription<M> {
-    rx: broadcast::Receiver<RpcFrame>,
+pub struct MultiSubscription<M, Mode: HeaderMode> {
+    rx: broadcast::Receiver<RpcFrame<Mode>>,
     _pd: PhantomData<M>,
+    _hm: PhantomData<Mode>,
 }
 
 /// Recv
@@ -851,7 +877,7 @@ pub enum MultiSubRxError {
     Lagged(u64),
 }
 
-impl<M> MultiSubscription<M>
+impl<M> MultiSubscription<M, Wired>
 where
     M: DeserializeOwned,
 {
@@ -875,13 +901,14 @@ where
 }
 
 // Manual Clone impl because WireErr may not impl Clone
-impl<WireErr> Clone for HostClient<WireErr> {
+impl<WireErr, Mode: HeaderMode> Clone for HostClient<WireErr, Mode> {
     fn clone(&self) -> Self {
         Self {
             ctx: self.ctx.clone(),
             out: self.out.clone(),
             err_key: self.err_key,
             _pd: PhantomData,
+            _hm: PhantomData,
             subscriptions: self.subscriptions.clone(),
             stopper: self.stopper.clone(),
             seq_kind: self.seq_kind,
@@ -890,25 +917,31 @@ impl<WireErr> Clone for HostClient<WireErr> {
 }
 
 /// Items necessary for implementing a custom I/O Task
-pub struct WireContext {
+pub struct WireContext<Mode: HeaderMode> {
     /// This is a stream of frames that should be placed on the
     /// wire towards the server.
-    pub outgoing: mpsc::Receiver<RpcFrame>,
+    pub outgoing: mpsc::Receiver<RpcFrame<Mode>>,
     /// This shared information contains the WaitMap used for replying to
     /// open requests.
-    pub incoming: Arc<HostContext>,
+    pub incoming: Arc<HostContext<Mode>>,
+    _hm: PhantomData<Mode>,
 }
 
 /// A single postcard-rpc frame
 #[derive(Clone)]
-pub struct RpcFrame {
+pub struct RpcFrame<Mode: HeaderMode> {
     /// The wire header
-    pub header: VarHeader,
+    pub header: Mode::HeaderType,
     /// The serialized message payload
     pub body: Vec<u8>,
+    /// Phantom data to keep track of the mode
+    pub _hm: PhantomData<Mode>,
 }
 
-impl RpcFrame {
+impl<Mode> RpcFrame<Mode>
+where
+    Mode: HeaderMode,
+{
     /// Serialize the `RpcFrame` into a Vec of bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = self.header.write_to_vec();
@@ -918,9 +951,9 @@ impl RpcFrame {
 }
 
 /// Shared context between [HostClient] and the I/O worker task
-pub struct HostContext {
+pub struct HostContext<H: HeaderMode> {
     kkind: RwLock<VarKeyKind>,
-    map: WaitMap<VarHeader, (VarHeader, Vec<u8>)>,
+    map: WaitMap<H::HeaderType, (H::HeaderType, Vec<u8>)>,
     seq: AtomicU32,
     subscription_timeout: Duration,
 }
@@ -946,10 +979,13 @@ pub enum ProcessError {
     Closed,
 }
 
-impl HostContext {
+impl<Mode> HostContext<Mode>
+where
+    Mode: HeaderMode,
+{
     /// Like `HostContext::process` but tells you if we processed the message or
     /// nobody wanted it
-    pub fn process_did_wake(&self, frame: RpcFrame) -> Result<bool, ProcessError> {
+    pub fn process_did_wake(&self, frame: RpcFrame<Mode>) -> Result<bool, ProcessError> {
         match self.map.wake(&frame.header, (frame.header, frame.body)) {
             WakeOutcome::Woke => Ok(true),
             WakeOutcome::NoMatch(_) => Ok(false),
@@ -960,7 +996,7 @@ impl HostContext {
     /// Process the message, returns Ok if the message was taken or dropped.
     ///
     /// Returns an Err if the map was closed.
-    pub fn process(&self, frame: RpcFrame) -> Result<(), ProcessError> {
+    pub fn process(&self, frame: RpcFrame<Mode>) -> Result<(), ProcessError> {
         if let WakeOutcome::Closed(_) = self.map.wake(&frame.header, (frame.header, frame.body)) {
             Err(ProcessError::Closed)
         } else {

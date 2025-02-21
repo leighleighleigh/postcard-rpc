@@ -1,0 +1,5 @@
+{
+    "rust-analyzer.diagnostics.disabled": [
+        "trait-impl-incorrect-safety"
+    ]
+}

@@ -8,7 +8,7 @@ use core::{
 use std::sync::Arc;
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq},
+    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, WiredHeader},
     host_client::util::Stopper,
     server::{
         AsWireRxErrorKind, AsWireTxErrorKind, WireRx, WireRxErrorKind, WireSpawn, WireTx,
@@ -28,7 +28,7 @@ use tokio::{select, sync::mpsc};
 pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
-        header::VarKeyKind,
+        header::{VarKeyKind, Wired},
         server::{Dispatch, Server},
     };
 
@@ -59,7 +59,7 @@ pub mod dispatch_impl {
     pub fn new_server<D>(
         dispatch: D,
         settings: Settings,
-    ) -> crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D>
+    ) -> crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D, Wired>
     where
         D: Dispatch<Tx = WireTxImpl>,
     {
@@ -80,7 +80,7 @@ pub mod dispatch_impl {
         dispatch: D,
         mut settings: Settings,
     ) -> (
-        crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D>,
+        crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D, Wired>,
         Stopper,
     )
     where
@@ -150,6 +150,11 @@ impl ChannelWireTx {
     }
 }
 
+// this will be a wired channel
+impl HeaderMode for ChannelWireTx {
+    type HeaderType = WiredHeader;
+}
+
 impl WireTx for ChannelWireTx {
     type Error = ChannelWireTxError;
 
@@ -177,7 +182,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = VarHeader {
+        let wh = Self::HeaderType {
             key,
             seq_no: VarSeq::Seq4(ctr),
         };
@@ -199,7 +204,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = VarHeader {
+        let wh = Self::HeaderType {
             key,
             seq_no: VarSeq::Seq4(ctr),
         };

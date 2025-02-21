@@ -8,7 +8,7 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 use crate::{
     accumulator::raw::{CobsAccumulator, FeedResult},
-    header::VarSeqKind,
+    header::{VarSeqKind, Wired,HeaderImpl,HeaderMode},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 
@@ -17,7 +17,7 @@ use crate::{
 /// These methods are used to create a new [HostClient] instance for use with tokio serial and cobs encoding.
 ///
 /// **Requires feature**: `cobs-serial`
-impl<WireErr> HostClient<WireErr>
+impl<WireErr> HostClient<WireErr,Wired>
 where
     WireErr: DeserializeOwned + Schema,
 {
@@ -211,14 +211,7 @@ impl SerialWireRx {
                     }
                     // We got a message! Attempt to dispatch it
                     FeedResult::Success { data, remaining } => {
-                        // TODO hacky check: the minimum size of a message is 9 bytes,
-                        // 8 for the header and one for the seq_no. Discard any "obviously"
-                        // malformed messages.
-                        if data.len() >= 9 {
-                            self.pending.push_back(data.to_vec());
-                        } else {
-                            tracing::warn!("Ignoring too-short message: {} bytes", data.len());
-                        }
+                        self.pending.push_back(data.to_vec());
                         remaining
                     }
                 };

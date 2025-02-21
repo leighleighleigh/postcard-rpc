@@ -33,16 +33,18 @@ use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq},
     DeviceMap, Key, TopicDirection,
 };
+
+use core::marker::PhantomData;
 
 //////////////////////////////////////////////////////////////////////////////
 // TX
 //////////////////////////////////////////////////////////////////////////////
 
 /// This trait defines how the server sends frames to the client
-pub trait WireTx {
+pub trait WireTx: HeaderMode {
     /// The error type of this connection.
     ///
     /// For simple cases, you can use [`WireTxErrorKind`] directly. You can also
@@ -360,17 +362,19 @@ impl<Tx: WireTx> Sender<Tx> {
 //////////////////////////////////////////////////////////////////////////////
 
 /// The [`Server`] is the main interface for handling communication
-pub struct Server<Tx, Rx, Buf, D>
+pub struct Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx,
     Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
+    Mode: HeaderMode,
 {
     tx: Sender<Tx>,
     rx: Rx,
     buf: Buf,
     dis: D,
+    _hm: core::marker::PhantomData<Mode>,
 }
 
 /// A type representing the different errors [`Server::run()`] may return
@@ -385,12 +389,13 @@ where
     RxFatal(Rx::Error),
 }
 
-impl<Tx, Rx, Buf, D> Server<Tx, Rx, Buf, D>
+impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx,
     Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
+    Mode: HeaderMode,
 {
     /// Create a new Server
     ///
@@ -407,6 +412,7 @@ where
             rx,
             buf,
             dis,
+            _hm: PhantomData,
         }
     }
 
@@ -424,6 +430,7 @@ where
                 rx,
                 buf,
                 dis: d,
+                _hm,
             } = self;
             let used = match rx.receive(buf).await {
                 Ok(u) => u,
@@ -436,7 +443,7 @@ where
                     }
                 }
             };
-            let Some((hdr, body)) = VarHeader::take_from_slice(used) else {
+            let Some((hdr, body)) = Tx::HeaderType::take_from_slice(used) else {
                 // TODO: send a nak on badly formed messages? We don't have
                 // much to say because we don't have a key or seq no or anything
                 continue;
@@ -454,12 +461,13 @@ where
     }
 }
 
-impl<Tx, Rx, Buf, D> Server<Tx, Rx, Buf, D>
+impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx + Clone,
     Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
+    Mode: HeaderMode,
 {
     /// Get a copy of the [`Sender`] to pass to tasks that need it
     pub fn sender(&self) -> Sender<Tx> {
@@ -486,7 +494,7 @@ pub trait Dispatch {
     async fn handle(
         &mut self,
         tx: &Sender<Self::Tx>,
-        hdr: &VarHeader,
+        hdr: &<Self::Tx as HeaderMode>::HeaderType,
         body: &[u8],
     ) -> Result<(), <Self::Tx as WireTx>::Error>;
 }

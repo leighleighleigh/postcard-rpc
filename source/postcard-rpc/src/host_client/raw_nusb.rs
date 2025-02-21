@@ -10,7 +10,7 @@ use postcard_schema::Schema;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    header::VarSeqKind,
+    header::{VarSeqKind,Wired,HeaderImpl,HeaderMode},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 
@@ -34,7 +34,7 @@ pub(crate) const MAX_STALL_RETRIES: usize = 10;
 /// USB bulk transfer encoding.
 ///
 /// **Requires feature**: `raw-nusb`
-impl<WireErr> HostClient<WireErr>
+impl<WireErr> HostClient<WireErr,Wired>
 where
     WireErr: DeserializeOwned + Schema,
 {

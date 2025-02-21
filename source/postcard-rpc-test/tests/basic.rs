@@ -10,7 +10,10 @@ use tokio::{sync::mpsc, task::yield_now, time::timeout};
 
 use postcard_rpc::{
     define_dispatch, endpoints,
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind},
+    header::{
+        HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind, Wired,
+        WiredHeader, Wireless,
+    },
     host_client::{test_channels as client, HostClient},
     server::{
         impls::test_channels::{
@@ -444,7 +447,8 @@ async fn end_to_end_schema() {
         server.run().await;
     });
 
-    let cli: HostClient<_> = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let cli: HostClient<_, Wired> =
+        client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
     let schema = cli.get_schema_report().await.unwrap();
 
     for ep in &schema.endpoints {

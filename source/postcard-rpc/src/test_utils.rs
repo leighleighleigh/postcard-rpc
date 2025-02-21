@@ -2,7 +2,9 @@
 
 use core::{fmt::Display, future::Future};
 
-use crate::header::{VarHeader, VarKey, VarSeq, VarSeqKind};
+use crate::header::{
+    HeaderImpl, HeaderMode, VarHeader, VarKey, VarSeq, VarSeqKind, Wired, WiredHeader,
+};
 use crate::host_client::util::Stopper;
 use crate::{
     host_client::{HostClient, RpcFrame, WireRx, WireSpawn, WireTx},
@@ -14,6 +16,8 @@ use tokio::{
     select,
     sync::mpsc::{channel, Receiver, Sender},
 };
+
+use core::marker::PhantomData;
 
 /// Rx Helper type
 pub struct LocalRx {
@@ -28,24 +32,26 @@ pub struct LocalTx {
 /// Spawn helper type
 pub struct LocalSpawn;
 /// Server type
-pub struct LocalFakeServer {
+pub struct LocalFakeServer<Mode: HeaderMode> {
     fake_error: Stopper,
     /// from client to server
     pub from_client: Receiver<Vec<u8>>,
     /// from server to client
     pub to_client: Sender<Vec<u8>>,
+    _hm: PhantomData<Mode>,
 }
 
-impl LocalFakeServer {
+impl LocalFakeServer<Wired> {
     /// receive a frame
-    pub async fn recv_from_client(&mut self) -> Result<RpcFrame, LocalError> {
+    pub async fn recv_from_client(&mut self) -> Result<RpcFrame<Wired>, LocalError> {
         let msg = self.from_client.recv().await.ok_or(LocalError::TxClosed)?;
         let Some((hdr, body)) = VarHeader::take_from_slice(&msg) else {
             return Err(LocalError::BadFrame);
         };
-        Ok(RpcFrame {
+        Ok(RpcFrame::<Wired> {
             header: hdr,
             body: body.to_vec(),
+            _hm: PhantomData,
         })
     }
 
@@ -58,12 +64,13 @@ impl LocalFakeServer {
     where
         E::Response: Serialize,
     {
-        let frame = RpcFrame {
-            header: VarHeader {
+        let frame = RpcFrame::<Wired> {
+            header: WiredHeader {
                 key: VarKey::Key8(E::RESP_KEY),
                 seq_no: VarSeq::Seq4(seq_no),
             },
             body: postcard::to_stdvec(data).unwrap(),
+            _hm: PhantomData,
         };
         self.to_client
             .send(frame.to_bytes())
@@ -80,12 +87,13 @@ impl LocalFakeServer {
     where
         T::Message: Serialize,
     {
-        let frame = RpcFrame {
-            header: VarHeader {
+        let frame = RpcFrame::<Wired> {
+            header: WiredHeader {
                 key: VarKey::Key8(T::TOPIC_KEY),
                 seq_no: VarSeq::Seq4(seq_no),
             },
             body: postcard::to_stdvec(data).unwrap(),
+            _hm: PhantomData,
         };
         self.to_client
             .send(frame.to_bytes())
@@ -180,9 +188,13 @@ impl WireSpawn for LocalSpawn {
 ///
 /// This is useful for testing and demonstrating server/client behavior,
 /// without actually requiring an external device.
-pub fn local_setup<E>(bound: usize, err_uri_path: &str) -> (LocalFakeServer, HostClient<E>)
+pub fn local_setup<E, Mode>(
+    bound: usize,
+    err_uri_path: &str,
+) -> (LocalFakeServer<Mode>, HostClient<E, Mode>)
 where
     E: Schema + DeserializeOwned,
+    Mode: HeaderMode + Send,
 {
     let (c2s_tx, c2s_rx) = channel(bound);
     let (s2c_tx, s2c_rx) = channel(bound);
@@ -192,7 +204,7 @@ where
     // if our USB device disconnected or the serial port was closed
     let fake_error = Stopper::new();
 
-    let client = HostClient::<E>::new_with_wire(
+    let client = HostClient::<E, Mode>::new_with_wire(
         LocalTx {
             to_server: c2s_tx,
             fake_error: fake_error.clone(),
@@ -207,10 +219,11 @@ where
         bound,
     );
 
-    let lfs = LocalFakeServer {
+    let lfs = LocalFakeServer::<Mode> {
         from_client: c2s_rx,
         to_client: s2c_tx,
         fake_error: fake_error.clone(),
+        _hm: core::marker::PhantomData,
     };
 
     (lfs, client)

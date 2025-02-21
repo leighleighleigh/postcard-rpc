@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! # Postcard-RPC Header Format
 //!
 //! Postcard-RPC's header is made up of three main parts:
@@ -58,7 +59,9 @@
 //! this is the client making the request. For Topics, this is the device sending the
 //! topic message.
 
+use crate::{Deserialize, Serialize};
 use crate::{Key, Key1, Key2, Key4};
+use core::marker::PhantomData;
 
 //////////////////////////////////////////////////////////////////////////////
 // VARKEY
@@ -361,6 +364,59 @@ pub enum VarSeqKind {
 ///
 /// We DO NOT impl Serialize/Deserialize for this type because we use
 /// non-postcard-compatible format (externally tagged)
+#[cfg_attr(not(feature = "use-std"), derive(Debug))]
+#[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Default)]
+pub struct Address {
+    pub mac_address: [u8; 6],
+}
+
+impl Address {
+    pub fn broadcast() -> Self {
+        Self {
+            mac_address: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        }
+    }
+}
+
+impl Into<[u8; 6]> for Address {
+    fn into(self) -> [u8; 6] {
+        self.mac_address
+    }
+}
+
+impl From<[u8; 6]> for Address {
+    fn from(value: [u8; 6]) -> Self {
+        Self { mac_address: value }
+    }
+}
+
+#[cfg(feature = "use-std")]
+impl core::fmt::Debug for Address {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.mac_address[0],
+            self.mac_address[1],
+            self.mac_address[2],
+            self.mac_address[3],
+            self.mac_address[4],
+            self.mac_address[5]
+        )
+    }
+}
+/// Header fields must impliment this simplified serde trait
+pub trait HeaderImpl: PartialEq + Clone + Copy + Send + core::fmt::Debug {
+    fn varkey(&self) -> &VarKey;
+    fn varseq(&self) -> &VarSeq;
+    #[cfg(feature = "use-std")]
+    fn write_to_vec(&self) -> Vec<u8>;
+    fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])>;
+    fn take_from_slice(buf: &[u8]) -> Option<(Self, &[u8])>
+    where
+        Self: Sized;
+}
+/// header
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct VarHeader {
     /// The variably sized Key
@@ -395,10 +451,12 @@ impl VarHeader {
     pub const VER_ZERO_BITS: u8 = 0b00_00_0000;
     /// Mask bits
     pub const VER_MASK_BITS: u8 = 0b00_00_1111;
+}
 
+impl HeaderImpl for VarHeader {
     /// Encode the header to a Vec of bytes
     #[cfg(feature = "use-std")]
-    pub fn write_to_vec(&self) -> Vec<u8> {
+    fn write_to_vec(&self) -> Vec<u8> {
         // start with placeholder byte
         let mut out = vec![0u8; 1];
         let mut disc_out: u8;
@@ -448,7 +506,7 @@ impl VarHeader {
     ///
     /// If the slice is not large enough, a `None` will be returned, and some bytes
     /// of the buffer may have been modified.
-    pub fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])> {
+    fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])> {
         let (disc_out, mut remain) = buf.split_first_mut()?;
         let mut used = 1;
 
@@ -511,7 +569,7 @@ impl VarHeader {
     /// decoded header and unused remaining bytes.
     ///
     /// If no well-formed header was found, a `None` will be returned.
-    pub fn take_from_slice(buf: &[u8]) -> Option<(Self, &[u8])> {
+    fn take_from_slice(buf: &[u8]) -> Option<(Self, &[u8])> {
         let (disc, mut remain) = buf.split_first()?;
 
         // For now, we only trust version zero
@@ -574,10 +632,90 @@ impl VarHeader {
         };
         Some((Self { key, seq_no }, remain))
     }
+
+    fn varkey(&self) -> &VarKey {
+        &self.key
+    }
+
+    fn varseq(&self) -> &VarSeq {
+        &self.seq_no
+    }
 }
+
+pub type WiredHeader = VarHeader;
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct WirelessHeader {
+    pub vh: VarHeader,
+    pub src: Address,
+    pub dst: Address,
+}
+
+impl HeaderImpl for WirelessHeader {
+    #[cfg(feature = "use-std")]
+    fn write_to_vec(&self) -> Vec<u8> {
+        self.vh.write_to_vec()
+    }
+
+    fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])> {
+        self.vh.write_to_slice(buf)
+    }
+
+    fn take_from_slice(buf: &[u8]) -> Option<(Self, &[u8])> {
+        if let Some((vh, rest)) = VarHeader::take_from_slice(buf) {
+            Some((
+                Self {
+                    vh,
+                    src: Address::default(),
+                    dst: Address::default(),
+                },
+                rest,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn varkey(&self) -> &VarKey {
+        self.vh.varkey()
+    }
+
+    fn varseq(&self) -> &VarSeq {
+        self.vh.varseq()
+    }
+}
+
+/// A marker trait for initializing drivers in a specific mode.
+/// Inspired by https://github.com/esp-rs/esp-hal
+pub trait HeaderMode: Clone + 'static {
+    type HeaderType: HeaderImpl; // the HeaderType must be something that impliments HeaderImpl / VarFields
+}
+#[derive(Debug, Copy, Clone)]
+pub struct Wired; // point-to-point, non-addressed communications channel. server+client
+
+#[derive(Debug, Copy, Clone)]
+pub struct Wireless(PhantomData<fn() -> *const ()>);
+// pub struct Wireless(PhantomData<fn(*const ()) -> *const ()>);
+// pub struct Wireless(PhantomData<fn(*const ())>);
+// pub struct Wireless(PhantomData<fn() -> *const ()>);
+// point-to-multi-point, addressed + routed communications channel. servers+clients.
+// doing PhantomData<fn() -> *const ()> allows Wireless to be Send! :O
+// https://doc.rust-lang.org/nomicon/phantom-data.html#table-of-phantomdata-patterns
+
+impl HeaderMode for Wired {
+    type HeaderType = WiredHeader;
+}
+impl HeaderMode for Wireless {
+    type HeaderType = WirelessHeader;
+}
+
+// Requires adding 'trait-impl-incorrect-safety' to 'rust-analyzer.diagnostics.disabled'
+unsafe impl Send for Wired {}
+unsafe impl Send for Wireless {}
 
 #[cfg(test)]
 mod test {
+    use super::HeaderImpl;
     use super::{VarHeader, VarKey, VarSeq};
     use crate::{Key, Key1, Key2};
 

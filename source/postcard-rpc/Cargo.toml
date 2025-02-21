@@ -1,15 +1,15 @@
 [package]
-name = "postcard-rpc"
-version = "0.11.8"
-authors = ["James Munns <james@onevariable.com>"]
-edition = "2021"
-repository = "https://github.com/jamesmunns/postcard-rpc"
-description = "A no_std + serde compatible RPC library for Rust"
-license = "MIT OR Apache-2.0"
-categories = ["embedded", "no-std"]
-keywords = ["serde", "cobs", "framing"]
+name          = "postcard-rpc"
+version       = "0.11.8"
+authors       = ["James Munns <james@onevariable.com>"]
+edition       = "2021"
+repository    = "https://github.com/jamesmunns/postcard-rpc"
+description   = "A no_std + serde compatible RPC library for Rust"
+license       = "MIT OR Apache-2.0"
+categories    = ["embedded", "no-std"]
+keywords      = ["serde", "cobs", "framing"]
 documentation = "https://docs.rs/postcard-rpc/"
-readme = "../../README.md"
+readme        = "../../README.md"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "doc_cfg"]
@@ -19,16 +19,18 @@ features = [
     "cobs-serial",
     "raw-nusb",
     "embassy-usb-0_3-server",
+    "embassy-usb-0_4-server",
+    "embedded-io-async-0_6-server",
     "_docs-fix",
     # TODO: What to do about the webusb feature? Can we do separate target builds?
 ]
 
 [dependencies]
-cobs = { version = "0.2.3", optional = true, default-features = false }
-defmt = { version = "0.3.5", optional = true }
-heapless = "0.8.0"
-postcard = { version = "1.0.10" }
-serde = { version = "1.0.192", default-features = false, features = ["derive"] }
+cobs            = { version = "0.2.3", optional = true, default-features = false }
+defmt           = { version = "0.3.5", optional = true }
+heapless        = "0.8.0"
+postcard        = { version = "1.0.10" }
+serde           = { version = "1.0.192", default-features = false, features = ["derive"] }
 postcard-schema = { version = "0.2.1", features = ["derive"] }
 
 #
@@ -36,32 +38,32 @@ postcard-schema = { version = "0.2.1", features = ["derive"] }
 #
 
 [dependencies.nusb]
-version = "0.1"
+version  = "0.1"
 optional = true
 
 [dependencies.tokio-serial]
-version = "5.4.4"
+version  = "5.4.4"
 optional = true
 
 [dependencies.maitake-sync]
-version = "0.1.2"
+version  = "0.1.2"
 optional = true
 
 [dependencies.tokio]
-version = "1.33.0"
+version  = "1.33.0"
 features = ["sync", "rt", "macros", "io-util", "time"]
 optional = true
 
 [dependencies.tracing]
-version = "0.1"
+version  = "0.1"
 optional = true
 
 [dependencies.js-sys]
-version = "0.3.69"
+version  = "0.3.69"
 optional = true
 
 [dependencies.thiserror]
-version = "1.0"
+version  = "1.0"
 optional = true
 
 [dependencies.web-sys]
@@ -83,23 +85,23 @@ features = [
 ]
 
 [dependencies.gloo]
-version = "0.11.0"
+version  = "0.11.0"
 optional = true
 
 [dependencies.serde_json]
-version = "1.0"
+version  = "1.0"
 optional = true
 
 [dependencies.wasm-bindgen]
-version = "0.2.92"
+version  = "0.2.92"
 optional = true
 
 [dependencies.wasm-bindgen-futures]
-version = "0.4.42"
+version  = "0.4.42"
 optional = true
 
 [dependencies.trait-variant]
-version = "0.1.2"
+version  = "0.1.2"
 optional = true
 
 
@@ -108,42 +110,47 @@ optional = true
 #
 
 [dependencies.embassy-usb-0_3]
-package = "embassy-usb"
-version = "0.3"
+package  = "embassy-usb"
+version  = "0.3"
 optional = true
 
 [dependencies.embassy-usb-0_4]
-package = "embassy-usb"
-version = "0.4"
+package  = "embassy-usb"
+version  = "0.4"
 optional = true
 
 [dependencies.embassy-usb-driver]
-version = "0.1"
+version  = "0.1"
 optional = true
 
 [dependencies.embassy-sync]
-version = "0.6"
+version  = "0.6"
 optional = true
 
 [dependencies.static_cell]
-version = "2.1"
+version  = "2.1"
 optional = true
 
 [dependencies.embassy-executor]
-version = "0.7"
+version  = "0.7"
 optional = true
 
 [dependencies.embassy-futures]
-version = "0.1"
+version  = "0.1"
 optional = true
 
 [dependencies.embassy-time]
-version = "0.4"
+version  = "0.4"
 optional = true
 
 [dependencies.portable-atomic]
-version = "1.0"
+version          = "1.0"
 default-features = false
+
+[dependencies.embedded-io-async-0_6]
+package  = "embedded-io-async"
+version  = "0.6"
+optional = true
 
 [dev-dependencies]
 postcard-rpc = { path = "../postcard-rpc", features = ["test-utils"] }
@@ -152,14 +159,22 @@ postcard-rpc = { path = "../postcard-rpc", features = ["test-utils"] }
 # Hack features (see below)
 #
 [dependencies.ssmarshal]
-version = "1.0"
+version  = "1.0"
 optional = true
 features = ["std"]
 
 
 [features]
-default = []
-test-utils = ["use-std", "postcard-schema/use-std"]
+default = [
+    # "webusb"
+    # "embassy-usb-0_3-server",
+    # "embassy-usb-0_4-server"
+    # "embedded-io-async-0_6-server"
+]
+
+test-utils = [
+    "use-std",
+]
 use-std = [
     "dep:maitake-sync",
     "dep:tokio",
@@ -222,6 +237,14 @@ embassy-usb-0_4-server = [
     "dep:embassy-executor",
     "dep:embassy-time",
     "dep:embassy-futures",
+]
+
+embedded-io-async-0_6-server = [
+    "dep:embassy-sync",
+    "dep:static_cell",
+    "dep:embassy-executor",
+    "dep:embedded-io-async-0_6",
+    "cobs",
 ]
 
 # NOTE: This exists because `embassy-usb` indirectly relies on ssmarshal

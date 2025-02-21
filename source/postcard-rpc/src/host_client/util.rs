@@ -12,18 +12,35 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    header::{VarHeader, VarKey, VarSeqKind},
+    header::{HeaderImpl, HeaderMode, VarKey, VarSeqKind},
     host_client::{
         HostClient, HostContext, ProcessError, RpcFrame, WireContext, WireRx, WireSpawn, WireTx,
     },
     Key,
 };
 
-#[derive(Default, Debug)]
-pub(crate) struct Subscriptions {
-    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcFrame>)>,
-    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcFrame>)>,
+use core::marker::PhantomData;
+
+#[derive(Debug)]
+pub(crate) struct Subscriptions<Mode: HeaderMode> {
+    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcFrame<Mode>>)>,
+    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcFrame<Mode>>)>,
     pub(crate) stopped: bool,
+    _hm: core::marker::PhantomData<Mode>,
+}
+
+impl<Mode> Default for Subscriptions<Mode>
+where
+    Mode: HeaderMode,
+{
+    fn default() -> Self {
+        Self {
+            exclusive_list: Vec::new(),
+            broadcast_list: Vec::new(),
+            stopped: false,
+            _hm: core::marker::PhantomData,
+        }
+    }
 }
 
 /// A basic cancellation-token
@@ -87,9 +104,10 @@ pub struct HostClientConfig<'c> {
     pub subscriber_timeout_if_full: Duration,
 }
 
-impl<WireErr> HostClient<WireErr>
+impl<WireErr, Mode> HostClient<WireErr, Mode>
 where
     WireErr: DeserializeOwned + Schema,
+    Mode: HeaderMode + Send,
 {
     /// Generic HostClient logic, using the various Wire traits
     ///
@@ -135,7 +153,11 @@ where
     {
         let (me, wire_ctx) = Self::new_manual_priv(config);
 
-        let WireContext { outgoing, incoming } = wire_ctx;
+        let WireContext {
+            outgoing,
+            incoming,
+            _hm,
+        } = wire_ctx;
 
         sp.spawn(out_worker(tx, outgoing, me.stopper.clone()));
         sp.spawn(in_worker(
@@ -150,10 +172,11 @@ where
 }
 
 /// Output worker, feeding frames to the `Client`.
-async fn out_worker<W>(wire: W, rec: mpsc::Receiver<RpcFrame>, stop: Stopper)
+async fn out_worker<W, Mode>(wire: W, rec: mpsc::Receiver<RpcFrame<Mode>>, stop: Stopper)
 where
     W: WireTx,
     W::Error: Debug,
+    Mode: HeaderMode,
 {
     let cancel_fut = stop.wait_stopped();
     let operate_fut = out_worker_inner(wire, rec);
@@ -167,10 +190,11 @@ where
     }
 }
 
-async fn out_worker_inner<W>(mut wire: W, mut rec: mpsc::Receiver<RpcFrame>)
+async fn out_worker_inner<W, Mode>(mut wire: W, mut rec: mpsc::Receiver<RpcFrame<Mode>>)
 where
     W: WireTx,
     W::Error: Debug,
+    Mode: HeaderMode,
 {
     loop {
         let Some(msg) = rec.recv().await else {
@@ -185,14 +209,15 @@ where
 }
 
 /// Input worker, getting frames from the `Client`
-async fn in_worker<W>(
+async fn in_worker<W, Mode>(
     wire: W,
-    host_ctx: Arc<HostContext>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
+    host_ctx: Arc<HostContext<Mode>>,
+    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
     stop: Stopper,
 ) where
     W: WireRx,
     W::Error: Debug,
+    Mode: HeaderMode,
 {
     let cancel_fut = stop.wait_stopped();
     let operate_fut = in_worker_inner(wire, host_ctx, subscriptions.clone());
@@ -212,13 +237,14 @@ async fn in_worker<W>(
     guard.broadcast_list.clear();
 }
 
-async fn in_worker_inner<W>(
+async fn in_worker_inner<W, Mode>(
     mut wire: W,
-    host_ctx: Arc<HostContext>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
+    host_ctx: Arc<HostContext<Mode>>,
+    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
 ) where
     W: WireRx,
     W::Error: Debug,
+    Mode: HeaderMode,
 {
     loop {
         let Ok(res) = wire.receive().await else {
@@ -226,7 +252,7 @@ async fn in_worker_inner<W>(
             return;
         };
 
-        let Some((hdr, body)) = VarHeader::take_from_slice(&res) else {
+        let Some((hdr, body)) = Mode::HeaderType::take_from_slice(&res) else {
             warn!("Header decode error!");
             continue;
         };
@@ -237,7 +263,7 @@ async fn in_worker_inner<W>(
 
         {
             let mut subs_guard = subscriptions.lock().await;
-            let key = hdr.key;
+            let key = hdr.varkey().clone();
 
             // Remove if sending fails
             //
@@ -248,9 +274,10 @@ async fn in_worker_inner<W>(
                 .find(|(k, _)| VarKey::Key8(*k) == key)
             {
                 handled = true;
-                let frame = RpcFrame {
+                let frame = RpcFrame::<Mode> {
                     header: hdr,
                     body: body.to_vec(),
+                    _hm: PhantomData,
                 };
                 let res = m.send(frame);
 
@@ -272,9 +299,10 @@ async fn in_worker_inner<W>(
                 .find(|(k, _)| VarKey::Key8(*k) == key)
             {
                 handled = true;
-                let frame = RpcFrame {
+                let frame = RpcFrame::<Mode> {
                     header: hdr,
                     body: body.to_vec(),
+                    _hm: PhantomData,
                 };
 
                 let res = m.try_send(frame);
@@ -324,9 +352,10 @@ async fn in_worker_inner<W>(
             continue;
         }
 
-        let frame = RpcFrame {
+        let frame = RpcFrame::<Mode> {
             header: hdr,
             body: body.to_vec(),
+            _hm: PhantomData,
         };
 
         match host_ctx.process_did_wake(frame) {
