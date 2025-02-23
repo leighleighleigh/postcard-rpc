@@ -366,32 +366,38 @@ pub enum VarSeqKind {
 /// non-postcard-compatible format (externally tagged)
 #[cfg_attr(not(feature = "use-std"), derive(Debug))]
 #[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Default)]
-pub struct Address {
+pub struct MacAddress {
     pub mac_address: [u8; 6],
 }
 
-impl Address {
+impl MacAddress {
     pub fn broadcast() -> Self {
         Self {
             mac_address: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
         }
     }
+    // this is more of a 'marker address' rather than a real address
+    pub fn localhost() -> Self {
+        Self {
+            mac_address: [127, 0, 0, 0, 0, 1],
+        }
+    }
 }
 
-impl Into<[u8; 6]> for Address {
+impl Into<[u8; 6]> for MacAddress {
     fn into(self) -> [u8; 6] {
         self.mac_address
     }
 }
 
-impl From<[u8; 6]> for Address {
+impl From<[u8; 6]> for MacAddress {
     fn from(value: [u8; 6]) -> Self {
         Self { mac_address: value }
     }
 }
 
 #[cfg(feature = "use-std")]
-impl core::fmt::Debug for Address {
+impl core::fmt::Debug for MacAddress {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
@@ -405,10 +411,40 @@ impl core::fmt::Debug for Address {
         )
     }
 }
-/// Header fields must impliment this simplified serde trait
-pub trait HeaderImpl: PartialEq + Clone + Copy + Send + core::fmt::Debug {
-    fn varkey(&self) -> &VarKey;
-    fn varseq(&self) -> &VarSeq;
+/// Addressable meta trait just means an associated type is defined for the header.
+/// This will be the 'address' type - which indicates where to send the message.
+pub trait Addressable {
+    type AddressType: PartialEq + Clone + Copy + Send + Default + core::fmt::Debug;
+    fn with_addresses(&self, src: Self::AddressType, dst: Self::AddressType) -> Self;
+    fn with_src(&self, src: Self::AddressType) -> Self;
+    fn with_dst(&self, dst: Self::AddressType) -> Self;
+    fn swap_addresses(&self) -> Self;
+    // builds localhost/broadcast address types.
+    fn localhost() -> Self::AddressType;
+    fn broadcast() -> Self::AddressType;
+}
+pub trait HeaderImplMeta: Clone + Copy + Send + core::fmt::Debug {
+    fn new(key: VarKey, seq_no: VarSeq) -> Self;
+    fn key(&self) -> &VarKey;
+    fn key_shrink_to(&self, kind: VarKeyKind) -> Self {
+        let mut nk = self.key().clone();
+        nk.shrink_to(kind);
+        self.with_key(nk)
+    }
+    fn seq_no(&self) -> &VarSeq;
+    fn with_key(&self, key: VarKey) -> Self;
+    fn with_seq_no(&self, seq_no: VarSeq) -> Self;
+}
+// PartialEq is required to use in the WaitMap
+pub trait HeaderImpl: PartialEq + HeaderImplMeta + Addressable {
+    fn into_response(&self, endpoint_response_key: VarKey) -> Self {
+        self.with_key(endpoint_response_key).swap_addresses()
+    }
+    fn new_for_topic_broadcast(key: VarKey, seq_no: VarSeq) -> Self {
+        Self::new(key, seq_no)
+            .with_src(Self::localhost())
+            .with_dst(Self::broadcast())
+    }
     #[cfg(feature = "use-std")]
     fn write_to_vec(&self) -> Vec<u8>;
     fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])>;
@@ -416,8 +452,9 @@ pub trait HeaderImpl: PartialEq + Clone + Copy + Send + core::fmt::Debug {
     where
         Self: Sized;
 }
+
 /// header
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct VarHeader {
     /// The variably sized Key
     pub key: VarKey,
@@ -451,6 +488,62 @@ impl VarHeader {
     pub const VER_ZERO_BITS: u8 = 0b00_00_0000;
     /// Mask bits
     pub const VER_MASK_BITS: u8 = 0b00_00_1111;
+}
+
+impl HeaderImplMeta for VarHeader {
+    fn new(key: VarKey, seq_no: VarSeq) -> Self {
+        Self { key, seq_no }
+    }
+
+    fn key(&self) -> &VarKey {
+        &self.key
+    }
+
+    fn seq_no(&self) -> &VarSeq {
+        &self.seq_no
+    }
+
+    fn with_key(&self, key: VarKey) -> Self {
+        Self {
+            key,
+            seq_no: self.seq_no,
+        }
+    }
+
+    fn with_seq_no(&self, seq_no: VarSeq) -> Self {
+        Self {
+            key: self.key,
+            seq_no,
+        }
+    }
+}
+
+impl Addressable for VarHeader {
+    type AddressType = ();
+
+    fn with_addresses(&self, _src: Self::AddressType, _dst: Self::AddressType) -> Self {
+        self.clone()
+    }
+
+    fn with_src(&self, _src: Self::AddressType) -> Self {
+        self.clone()
+    }
+
+    fn with_dst(&self, _dst: Self::AddressType) -> Self {
+        self.clone()
+    }
+
+    fn swap_addresses(&self) -> Self {
+        self.clone()
+    }
+
+    fn localhost() -> Self::AddressType {
+        ()
+    }
+
+    fn broadcast() -> Self::AddressType {
+        ()
+    }
 }
 
 impl HeaderImpl for VarHeader {
@@ -632,23 +725,65 @@ impl HeaderImpl for VarHeader {
         };
         Some((Self { key, seq_no }, remain))
     }
-
-    fn varkey(&self) -> &VarKey {
-        &self.key
-    }
-
-    fn varseq(&self) -> &VarSeq {
-        &self.seq_no
-    }
 }
 
 pub type WiredHeader = VarHeader;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+impl PartialEq for WiredHeader {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.seq_no == other.seq_no
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct WirelessHeader {
     pub vh: VarHeader,
-    pub src: Address,
-    pub dst: Address,
+    pub src: MacAddress,
+    pub dst: MacAddress,
+}
+
+impl Addressable for WirelessHeader {
+    type AddressType = MacAddress;
+
+    fn with_addresses(&self, src: Self::AddressType, dst: Self::AddressType) -> Self {
+        Self {
+            vh: self.vh,
+            src,
+            dst,
+        }
+    }
+
+    fn with_src(&self, src: Self::AddressType) -> Self {
+        Self {
+            vh: self.vh,
+            src,
+            dst: self.dst,
+        }
+    }
+
+    fn with_dst(&self, dst: Self::AddressType) -> Self {
+        Self {
+            vh: self.vh,
+            src: self.src,
+            dst,
+        }
+    }
+
+    fn swap_addresses(&self) -> Self {
+        Self {
+            vh: self.vh,
+            src: self.dst,
+            dst: self.src,
+        }
+    }
+
+    fn localhost() -> Self::AddressType {
+        MacAddress::broadcast()
+    }
+
+    fn broadcast() -> Self::AddressType {
+        MacAddress::localhost()
+    }
 }
 
 impl HeaderImpl for WirelessHeader {
@@ -666,8 +801,8 @@ impl HeaderImpl for WirelessHeader {
             Some((
                 Self {
                     vh,
-                    src: Address::default(),
-                    dst: Address::default(),
+                    src: MacAddress::default(),
+                    dst: MacAddress::default(),
                 },
                 rest,
             ))
@@ -675,13 +810,51 @@ impl HeaderImpl for WirelessHeader {
             None
         }
     }
+}
 
-    fn varkey(&self) -> &VarKey {
-        self.vh.varkey()
+impl HeaderImplMeta for WirelessHeader {
+    fn new(key: VarKey, seq_no: VarSeq) -> Self {
+        Self {
+            vh: VarHeader::new(key, seq_no),
+            src: MacAddress::default(),
+            dst: MacAddress::default(),
+        }
     }
 
-    fn varseq(&self) -> &VarSeq {
-        self.vh.varseq()
+    fn key(&self) -> &VarKey {
+        self.vh.key()
+    }
+
+    fn seq_no(&self) -> &VarSeq {
+        self.vh.seq_no()
+    }
+
+    fn with_key(&self, key: VarKey) -> Self {
+        Self {
+            vh: self.vh.with_key(key),
+            src: self.src,
+            dst: self.dst,
+        }
+    }
+
+    fn with_seq_no(&self, seq_no: VarSeq) -> Self {
+        Self {
+            vh: self.vh.with_seq_no(seq_no),
+            src: self.src,
+            dst: self.dst,
+        }
+    }
+}
+
+impl PartialEq for WirelessHeader {
+    fn eq(&self, other: &Self) -> bool {
+        // this one is a bit conditional! as it handles the case where we sent a broadcast and
+        // are expecting a reply - but we dont know where it will come from.
+        if self.src == Self::broadcast() {
+            self.vh == other.vh && self.dst == other.dst
+        } else {
+            self.vh == other.vh && self.src == other.src && self.dst == other.dst
+        }
     }
 }
 

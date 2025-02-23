@@ -2,19 +2,16 @@
 
 use core::{fmt::Display, future::Future};
 
-use crate::header::{
-    HeaderImpl, HeaderMode, VarHeader, VarKey, VarSeq, VarSeqKind, Wired, WiredHeader,
-};
+use crate::header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarSeq, Wired, WiredHeader};
 use crate::host_client::util::Stopper;
 use crate::{
-    host_client::{HostClient, RpcFrame, WireRx, WireSpawn, WireTx},
+    host_client::{RpcFrame, WireRx, WireSpawn, WireTx},
     Endpoint, Topic,
 };
-use postcard_schema::Schema;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 use tokio::{
     select,
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{Receiver, Sender},
 };
 
 use core::marker::PhantomData;
@@ -184,47 +181,47 @@ impl WireSpawn for LocalSpawn {
     }
 }
 
-/// This function creates a directly-linked Server and Client.
-///
-/// This is useful for testing and demonstrating server/client behavior,
-/// without actually requiring an external device.
-pub fn local_setup<E, Mode>(
-    bound: usize,
-    err_uri_path: &str,
-) -> (LocalFakeServer<Mode>, HostClient<E, Mode>)
-where
-    E: Schema + DeserializeOwned,
-    Mode: HeaderMode + Send,
-{
-    let (c2s_tx, c2s_rx) = channel(bound);
-    let (s2c_tx, s2c_rx) = channel(bound);
+// /// This function creates a directly-linked Server and Client.
+// ///
+// /// This is useful for testing and demonstrating server/client behavior,
+// /// without actually requiring an external device.
+// pub fn local_setup<E, Mode>(
+//     bound: usize,
+//     err_uri_path: &str,
+// ) -> (LocalFakeServer<Mode>, HostClient<E, Mode>)
+// where
+//     E: Schema + DeserializeOwned,
+//     Mode: HeaderMode + Send,
+// {
+//     let (c2s_tx, c2s_rx) = channel(bound);
+//     let (s2c_tx, s2c_rx) = channel(bound);
 
-    // NOTE: the normal HostClient machinery has it's own Stopper used for signalling
-    // errors, this is an EXTRA stopper we use to simulate the error occurring, like
-    // if our USB device disconnected or the serial port was closed
-    let fake_error = Stopper::new();
+//     // NOTE: the normal HostClient machinery has it's own Stopper used for signalling
+//     // errors, this is an EXTRA stopper we use to simulate the error occurring, like
+//     // if our USB device disconnected or the serial port was closed
+//     let fake_error = Stopper::new();
 
-    let client = HostClient::<E, Mode>::new_with_wire(
-        LocalTx {
-            to_server: c2s_tx,
-            fake_error: fake_error.clone(),
-        },
-        LocalRx {
-            from_server: s2c_rx,
-            fake_error: fake_error.clone(),
-        },
-        LocalSpawn,
-        VarSeqKind::Seq2,
-        err_uri_path,
-        bound,
-    );
+//     let client = HostClient::<E, Mode>::new_with_wire(
+//         LocalTx {
+//             to_server: c2s_tx,
+//             fake_error: fake_error.clone(),
+//         },
+//         LocalRx {
+//             from_server: s2c_rx,
+//             fake_error: fake_error.clone(),
+//         },
+//         LocalSpawn,
+//         VarSeqKind::Seq2,
+//         err_uri_path,
+//         bound,
+//     );
 
-    let lfs = LocalFakeServer::<Mode> {
-        from_client: c2s_rx,
-        to_client: s2c_tx,
-        fake_error: fake_error.clone(),
-        _hm: core::marker::PhantomData,
-    };
+//     let lfs = LocalFakeServer::<Mode> {
+//         from_client: c2s_rx,
+//         to_client: s2c_tx,
+//         fake_error: fake_error.clone(),
+//         _hm: core::marker::PhantomData,
+//     };
 
-    (lfs, client)
-}
+//     (lfs, client)
+// }

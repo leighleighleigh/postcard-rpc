@@ -27,7 +27,10 @@ use tokio::{
 use util::Subscriptions;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind, Wired},
+    header::{
+        Addressable, HeaderImpl, HeaderImplMeta, HeaderMode, VarKey, VarKeyKind, VarSeq,
+        VarSeqKind, Wired,
+    },
     standard_icd::{GetAllSchemaDataTopic, GetAllSchemasEndpoint, OwnedSchemaData},
     Endpoint, Key, Topic, TopicDirection,
 };
@@ -247,12 +250,413 @@ impl<WireErr> From<UnableToFindType> for SchemaError<WireErr> {
 }
 
 /// # Interface Methods
-impl<WireErr> HostClient<WireErr, Wired>
+impl<WireErr, Mode> HostClient<WireErr, Mode>
 where
     WireErr: DeserializeOwned + Schema,
+    Mode: HeaderMode + Send,
 {
+    /// Perform an endpoint request/response,but without handling the
+    /// Ser/De automatically
+    pub async fn send_resp_raw(
+        &self,
+        rqst: RpcFrame<Mode>,
+        resp_key: Key,
+    ) -> Result<RpcFrame<Mode>, HostErr<WireErr>> {
+        let cancel_fut = self.stopper.wait_stopped();
+        let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
+        rqst.header.key_shrink_to(kkind);
+
+        let mut resp_key = VarKey::Key8(resp_key);
+        let mut err_key = VarKey::Key8(self.err_key);
+        resp_key.shrink_to(kkind);
+        err_key.shrink_to(kkind);
+
+        // Prepare to receive the reply, BEFORE we send the request.
+        // This uses the `enqueue` feature of WaitMap, which makes sure that
+        // our receiver is ready to "catch" before we even send the request.
+        let ok_resp = self.ctx.map.wait(rqst.header.into_response(resp_key));
+        let err_resp = self.ctx.map.wait(rqst.header.into_response(err_key));
+        let mut ok_resp = std::pin::pin!(ok_resp);
+        let mut err_resp = std::pin::pin!(err_resp);
+        let setup_fut: Result<(), WaitError> = async {
+            ok_resp.as_mut().enqueue().await?;
+            err_resp.as_mut().enqueue().await?;
+            Ok(())
+        }
+        .await;
+
+        // If registering for the response failed, return an error
+        if let Err(e) = setup_fut {
+            return Err(match e {
+                WaitError::Closed => HostErr::Closed,
+                WaitError::Duplicate => {
+                    tracing::error!("Attempted to register a duplicate wait for a reply. This can happen if sequence numbers are reused.");
+                    // TODO: This is the wrong kind of error, but we don't want to report closed.
+                    // Fix this in the next breaking change of postcard-rpc, or make HostErr non-exhaustive
+                    HostErr::BadResponse
+                }
+
+                // These should never happen: NeverAdded and AlreadyConsumed
+                _ => {
+                    tracing::error!("Internal error setting up reply: {e:?}, closing");
+                    self.close();
+                    HostErr::Closed
+                }
+            });
+        };
+
+        self.out.send(rqst).await.map_err(|_| HostErr::Closed)?;
+
+        select! {
+            _c = cancel_fut => Err(HostErr::Closed),
+            o = ok_resp => {
+                let (hdr, resp) = o?;
+                if hdr.key().kind() != kkind {
+                    *self.ctx.kkind.write().unwrap() = hdr.key().kind();
+                }
+                Ok(RpcFrame::<Mode> { header: hdr, body: resp, _hm: PhantomData })
+            },
+            e = err_resp => {
+                let (hdr, resp) = e?;
+                if hdr.key().kind() != kkind {
+                    *self.ctx.kkind.write().unwrap() = hdr.key().kind();
+                }
+                let r = postcard::from_bytes::<WireErr>(&resp)?;
+                Err(HostErr::Wire(r))
+            },
+        }
+    }
+
+    /// Publish a [Topic] [Message][Topic::Message].
+    ///
+    /// There is no feedback if the server received our message. If the I/O worker is
+    /// closed, an error is returned.
+    pub async fn publish<T: Topic>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), IoClosed>
+    where
+        T::Message: Serialize,
+    {
+        let smsg = postcard::to_stdvec(msg).expect("alloc should never fail");
+        let frame = RpcFrame::<Mode> {
+            header: Mode::HeaderType::new(VarKey::Key8(T::TOPIC_KEY), seq_no),
+            body: smsg,
+            _hm: PhantomData,
+        };
+        self.publish_raw(frame).await
+    }
+
+    /// Publish the given raw frame
+    pub async fn publish_raw(&self, frame: RpcFrame<Mode>) -> Result<(), IoClosed> {
+        let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
+        frame.header.key_shrink_to(kkind);
+
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.out.send(frame);
+
+        select! {
+            _ = cancel_fut => Err(IoClosed),
+            res = operate_fut => res.map_err(|_| IoClosed),
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Subscribe Multi
+    ///////////////////////////////////////////////////////////////////////////
+
+    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
+    /// stream of [Message][Topic::Message]s. Unlike `subscribe`, multiple subscribers
+    /// to the same stream are allowed, and behave as a broadcast channel.
+    ///
+    /// Returns an Error if the I/O worker is closed.
+    pub async fn subscribe_multi<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<MultiSubscription<T::Message, Mode>, IoClosed>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.subscribe_multi_inner::<T>(depth);
+        select! {
+            _ = cancel_fut => Err(IoClosed),
+            res = operate_fut => res,
+        }
+    }
+
+    /// Inner function version of [Self::subscribe_multi]
+    async fn subscribe_multi_inner<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<MultiSubscription<T::Message, Mode>, IoClosed>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let rx = {
+            let mut guard = self.subscriptions.lock().await;
+            if guard.stopped {
+                return Err(IoClosed);
+            }
+            if let Some(entry) = guard
+                .broadcast_list
+                .iter_mut()
+                .find(|(k, _)| *k == T::TOPIC_KEY)
+            {
+                entry.1.subscribe()
+            } else {
+                let (tx, rx) = broadcast::channel(depth);
+                guard.broadcast_list.push((T::TOPIC_KEY, tx));
+                rx
+            }
+        };
+        Ok(MultiSubscription {
+            rx,
+            _pd: PhantomData,
+            _hm: PhantomData,
+        })
+    }
+
+    /// Subscribe to the given [`Key`], without automatically handling deserialization
+    pub async fn subscribe_multi_raw(
+        &self,
+        key: Key,
+        depth: usize,
+    ) -> Result<RawMultiSubscription<Mode>, IoClosed> {
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.subscribe_multi_inner_raw(key, depth);
+        select! {
+            _ = cancel_fut => Err(IoClosed),
+            res = operate_fut => res,
+        }
+    }
+
+    /// Inner function version of [Self::subscribe]
+    async fn subscribe_multi_inner_raw(
+        &self,
+        key: Key,
+        depth: usize,
+    ) -> Result<RawMultiSubscription<Mode>, IoClosed> {
+        let rx = {
+            let mut guard = self.subscriptions.lock().await;
+            if guard.stopped {
+                return Err(IoClosed);
+            }
+            if let Some(entry) = guard.broadcast_list.iter_mut().find(|(k, _)| *k == key) {
+                entry.1.subscribe()
+            } else {
+                let (tx, rx) = broadcast::channel(depth);
+                guard.broadcast_list.push((key, tx));
+                rx
+            }
+        };
+        Ok(RawMultiSubscription {
+            rx,
+            _hm: PhantomData,
+        })
+    }
+
+    // Subscribe (Legacy)
+    ///////////////////////////////////////////////////////////////////////////
+
+    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
+    /// stream of [Message][Topic::Message]s.
+    ///
+    /// If you subscribe to the same topic multiple times, the previous subscription
+    /// will be closed (there can be only one). This does not apply to subscriptions
+    /// created with `subscribe_multi`. This also WILL close subscriptions opened by
+    /// [`subscribe_exclusive`](Self::subscribe_exclusive).
+    ///
+    /// Returns an Error if the I/O worker is closed.
+    #[deprecated = "In future versions, `subscribe` will be removed. Use `subscribe_multi` or `subscribe_exclusive` instead."]
+    pub async fn subscribe<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<Subscription<T::Message, Mode>, IoClosed>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.subscribe_inner::<T>(depth);
+        select! {
+            _ = cancel_fut => Err(IoClosed),
+            res = operate_fut => res,
+        }
+    }
+
+    /// Inner function version of [Self::subscribe]
+    async fn subscribe_inner<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<Subscription<T::Message, Mode>, IoClosed>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(depth);
+        {
+            let mut guard = self.subscriptions.lock().await;
+            if guard.stopped {
+                return Err(IoClosed);
+            }
+            if let Some(entry) = guard
+                .exclusive_list
+                .iter_mut()
+                .find(|(k, _)| *k == T::TOPIC_KEY)
+            {
+                if !entry.1.is_closed() {
+                    tracing::warn!("replacing subscription for topic path '{}'", T::PATH);
+                }
+                entry.1 = tx;
+            } else {
+                guard.exclusive_list.push((T::TOPIC_KEY, tx));
+            }
+        }
+        Ok(Subscription {
+            rx,
+            _pd: PhantomData,
+            _hm: PhantomData,
+        })
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // Subscribe Exclusive
+    ///////////////////////////////////////////////////////////////////////////
+
+    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
+    /// stream of [Message][Topic::Message]s.
+    ///
+    /// If you try to subscribe to the same topic multiple times, this function returns a
+    /// [`SubscribeError::AlreadySubscribed`] (there can be only one).
+    /// This does not apply to subscriptions created with `subscribe_multi`.
+    ///
+    /// Returns an Error if the I/O worker is closed.
+    pub async fn subscribe_exclusive<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<Subscription<T::Message, Mode>, SubscribeError>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.subscribe_inner_exclusive::<T>(depth);
+        select! {
+            _ = cancel_fut => Err(SubscribeError::IoClosed),
+            res = operate_fut => res,
+        }
+    }
+
+    /// Inner function version of [Self::subscribe_exclusive]
+    async fn subscribe_inner_exclusive<T: Topic>(
+        &self,
+        depth: usize,
+    ) -> Result<Subscription<T::Message, Mode>, SubscribeError>
+    where
+        T::Message: DeserializeOwned,
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(depth);
+        {
+            let mut guard = self.subscriptions.lock().await;
+            if guard.stopped {
+                return Err(SubscribeError::IoClosed);
+            }
+            if let Some(entry) = guard
+                .exclusive_list
+                .iter_mut()
+                .find(|(k, _)| *k == T::TOPIC_KEY)
+            {
+                if !entry.1.is_closed() {
+                    return Err(SubscribeError::AlreadySubscribed);
+                }
+                entry.1 = tx;
+            } else {
+                guard.exclusive_list.push((T::TOPIC_KEY, tx));
+            }
+        }
+        Ok(Subscription {
+            rx,
+            _pd: PhantomData,
+            _hm: PhantomData,
+        })
+    }
+
+    /// Subscribe to the given [`Key`], without automatically handling deserialization.
+    ///
+    /// If you try to subscribe to the same topic multiple times, this function returns a
+    /// [`SubscribeError::AlreadySubscribed`] (there can be only one).
+    /// This does not apply to subscriptions created with `subscribe_multi`.
+    ///
+    /// Returns an Error if the I/O worker is closed.
+    pub async fn subscribe_exclusive_raw(
+        &self,
+        key: Key,
+        depth: usize,
+    ) -> Result<RawSubscription<Mode>, SubscribeError> {
+        let cancel_fut = self.stopper.wait_stopped();
+        let operate_fut = self.subscribe_inner_exclusive_raw(key, depth);
+        select! {
+            _ = cancel_fut => Err(SubscribeError::IoClosed),
+            res = operate_fut => res,
+        }
+    }
+
+    /// Inner function version of [Self::subscribe_exclusive_raw]
+    async fn subscribe_inner_exclusive_raw(
+        &self,
+        key: Key,
+        depth: usize,
+    ) -> Result<RawSubscription<Mode>, SubscribeError> {
+        let (tx, rx) = tokio::sync::mpsc::channel(depth);
+        {
+            let mut guard = self.subscriptions.lock().await;
+            if guard.stopped {
+                return Err(SubscribeError::IoClosed);
+            }
+            if let Some(entry) = guard.exclusive_list.iter_mut().find(|(k, _)| *k == key) {
+                if !entry.1.is_closed() {
+                    return Err(SubscribeError::AlreadySubscribed);
+                }
+                entry.1 = tx;
+            } else {
+                guard.exclusive_list.push((key, tx));
+            }
+        }
+        Ok(RawSubscription {
+            rx,
+            _hm: PhantomData,
+        })
+    }
+
+    /// Send a message of type [Endpoint::Request][Endpoint] to `path`, and await
+    /// a response of type [Endpoint::Response][Endpoint] (or WireErr) to `path`.
+    ///
+    /// This function will wait potentially forever. Consider using with a timeout.
+    pub async fn send_request_to<E: Endpoint>(
+        &self,
+        server_addr: <Mode::HeaderType as Addressable>::AddressType,
+        t: &E::Request,
+    ) -> Result<E::Response, HostErr<WireErr>>
+    where
+        E::Request: Serialize + Schema,
+        E::Response: DeserializeOwned + Schema,
+    {
+        let seq_no = self.ctx.seq.fetch_add(1, Ordering::Relaxed);
+
+        let msg = postcard::to_stdvec(&t).expect("Allocations should not ever fail");
+        let frame = RpcFrame::<Mode> {
+            // NOTE: send_resp_raw automatically shrinks down key and sequence
+            // kinds to the appropriate amount
+            header: Mode::HeaderType::new(VarKey::Key8(E::REQ_KEY), VarSeq::Seq4(seq_no))
+                .with_dst(server_addr),
+            body: msg,
+            _hm: PhantomData,
+        };
+        let frame = self.send_resp_raw(frame, E::RESP_KEY).await?;
+        let r = postcard::from_bytes::<E::Response>(&frame.body)?;
+        Ok(r)
+    }
+
     /// Obtain a [`SchemaReport`] describing the connected device
-    pub async fn get_schema_report(&self) -> Result<SchemaReport, SchemaError<WireErr>> {
+    pub async fn get_schema_report_from(
+        &self,
+        server_addr: <Mode::HeaderType as Addressable>::AddressType,
+    ) -> Result<SchemaReport, SchemaError<WireErr>> {
         let Ok(mut sub) = self.subscribe_multi::<GetAllSchemaDataTopic>(64).await else {
             return Err(SchemaError::Comms(HostErr::Closed));
         };
@@ -268,7 +672,9 @@ where
                 got
             }
         });
-        let trigger_task = self.send_resp::<GetAllSchemasEndpoint>(&()).await;
+        let trigger_task = self
+            .send_request_to::<GetAllSchemasEndpoint>(server_addr, &())
+            .await;
         let data = collect_task.await;
         let (resp, data) = match (trigger_task, data) {
             (Ok(a), Ok(b)) => (a, b),
@@ -324,461 +730,6 @@ where
         }
     }
 
-    /// Send a message of type [Endpoint::Request][Endpoint] to `path`, and await
-    /// a response of type [Endpoint::Response][Endpoint] (or WireErr) to `path`.
-    ///
-    /// This function will wait potentially forever. Consider using with a timeout.
-    pub async fn send_resp<E: Endpoint>(
-        &self,
-        t: &E::Request,
-    ) -> Result<E::Response, HostErr<WireErr>>
-    where
-        E::Request: Serialize + Schema,
-        E::Response: DeserializeOwned + Schema,
-    {
-        let seq_no = self.ctx.seq.fetch_add(1, Ordering::Relaxed);
-
-        let msg = postcard::to_stdvec(&t).expect("Allocations should not ever fail");
-        let frame = RpcFrame::<Wired> {
-            // NOTE: send_resp_raw automatically shrinks down key and sequence
-            // kinds to the appropriate amount
-            header: VarHeader {
-                key: VarKey::Key8(E::REQ_KEY),
-                seq_no: VarSeq::Seq4(seq_no),
-            },
-            body: msg,
-            _hm: PhantomData,
-        };
-        let frame = self.send_resp_raw(frame, E::RESP_KEY).await?;
-        let r = postcard::from_bytes::<E::Response>(&frame.body)?;
-        Ok(r)
-    }
-
-    /// Perform an endpoint request/response,but without handling the
-    /// Ser/De automatically
-    pub async fn send_resp_raw(
-        &self,
-        mut rqst: RpcFrame<Wired>,
-        resp_key: Key,
-    ) -> Result<RpcFrame<Wired>, HostErr<WireErr>> {
-        let cancel_fut = self.stopper.wait_stopped();
-        let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
-        rqst.header.key.shrink_to(kkind);
-        let mut resp_key = VarKey::Key8(resp_key);
-        let mut err_key = VarKey::Key8(self.err_key);
-        resp_key.shrink_to(kkind);
-        err_key.shrink_to(kkind);
-
-        // Prepare to receive the reply, BEFORE we send the request.
-        // This uses the `enqueue` feature of WaitMap, which makes sure that
-        // our receiver is ready to "catch" before we even send the request.
-        let ok_resp = self.ctx.map.wait(VarHeader {
-            seq_no: rqst.header.seq_no,
-            key: resp_key,
-        });
-        let err_resp = self.ctx.map.wait(VarHeader {
-            seq_no: rqst.header.seq_no,
-            key: err_key,
-        });
-        let mut ok_resp = std::pin::pin!(ok_resp);
-        let mut err_resp = std::pin::pin!(err_resp);
-        let setup_fut: Result<(), WaitError> = async {
-            ok_resp.as_mut().enqueue().await?;
-            err_resp.as_mut().enqueue().await?;
-            Ok(())
-        }
-        .await;
-
-        // If registering for the response failed, return an error
-        if let Err(e) = setup_fut {
-            return Err(match e {
-                WaitError::Closed => HostErr::Closed,
-                WaitError::Duplicate => {
-                    tracing::error!("Attempted to register a duplicate wait for a reply. This can happen if sequence numbers are reused.");
-                    // TODO: This is the wrong kind of error, but we don't want to report closed.
-                    // Fix this in the next breaking change of postcard-rpc, or make HostErr non-exhaustive
-                    HostErr::BadResponse
-                }
-
-                // These should never happen: NeverAdded and AlreadyConsumed
-                _ => {
-                    tracing::error!("Internal error setting up reply: {e:?}, closing");
-                    self.close();
-                    HostErr::Closed
-                }
-            });
-        };
-
-        self.out.send(rqst).await.map_err(|_| HostErr::Closed)?;
-
-        select! {
-            _c = cancel_fut => Err(HostErr::Closed),
-            o = ok_resp => {
-                let (hdr, resp) = o?;
-                if hdr.key.kind() != kkind {
-                    *self.ctx.kkind.write().unwrap() = hdr.key.kind();
-                }
-                Ok(RpcFrame::<Wired> { header: hdr, body: resp, _hm: PhantomData })
-            },
-            e = err_resp => {
-                let (hdr, resp) = e?;
-                if hdr.key.kind() != kkind {
-                    *self.ctx.kkind.write().unwrap() = hdr.key.kind();
-                }
-                let r = postcard::from_bytes::<WireErr>(&resp)?;
-                Err(HostErr::Wire(r))
-            },
-        }
-    }
-
-    /// Publish a [Topic] [Message][Topic::Message].
-    ///
-    /// There is no feedback if the server received our message. If the I/O worker is
-    /// closed, an error is returned.
-    pub async fn publish<T: Topic>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), IoClosed>
-    where
-        T::Message: Serialize,
-    {
-        let smsg = postcard::to_stdvec(msg).expect("alloc should never fail");
-        let frame = RpcFrame::<Wired> {
-            header: VarHeader {
-                key: VarKey::Key8(T::TOPIC_KEY),
-                seq_no,
-            },
-            body: smsg,
-            _hm: PhantomData,
-        };
-        self.publish_raw(frame).await
-    }
-
-    /// Publish the given raw frame
-    pub async fn publish_raw(&self, mut frame: RpcFrame<Wired>) -> Result<(), IoClosed> {
-        let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
-        frame.header.key.shrink_to(kkind);
-
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.out.send(frame);
-
-        select! {
-            _ = cancel_fut => Err(IoClosed),
-            res = operate_fut => res.map_err(|_| IoClosed),
-        }
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Subscribe Multi
-    ///////////////////////////////////////////////////////////////////////////
-
-    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
-    /// stream of [Message][Topic::Message]s. Unlike `subscribe`, multiple subscribers
-    /// to the same stream are allowed, and behave as a broadcast channel.
-    ///
-    /// Returns an Error if the I/O worker is closed.
-    pub async fn subscribe_multi<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<MultiSubscription<T::Message, Wired>, IoClosed>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_multi_inner::<T>(depth);
-        select! {
-            _ = cancel_fut => Err(IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe_multi]
-    async fn subscribe_multi_inner<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<MultiSubscription<T::Message, Wired>, IoClosed>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let rx = {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(IoClosed);
-            }
-            if let Some(entry) = guard
-                .broadcast_list
-                .iter_mut()
-                .find(|(k, _)| *k == T::TOPIC_KEY)
-            {
-                entry.1.subscribe()
-            } else {
-                let (tx, rx) = broadcast::channel(depth);
-                guard.broadcast_list.push((T::TOPIC_KEY, tx));
-                rx
-            }
-        };
-        Ok(MultiSubscription {
-            rx,
-            _pd: PhantomData,
-            _hm: PhantomData,
-        })
-    }
-
-    /// Subscribe to the given [`Key`], without automatically handling deserialization
-    pub async fn subscribe_multi_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawMultiSubscription<Wired>, IoClosed> {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_multi_inner_raw(key, depth);
-        select! {
-            _ = cancel_fut => Err(IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe]
-    async fn subscribe_multi_inner_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawMultiSubscription<Wired>, IoClosed> {
-        let rx = {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(IoClosed);
-            }
-            if let Some(entry) = guard.broadcast_list.iter_mut().find(|(k, _)| *k == key) {
-                entry.1.subscribe()
-            } else {
-                let (tx, rx) = broadcast::channel(depth);
-                guard.broadcast_list.push((key, tx));
-                rx
-            }
-        };
-        Ok(RawMultiSubscription {
-            rx,
-            _hm: PhantomData,
-        })
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Subscribe (Legacy)
-    ///////////////////////////////////////////////////////////////////////////
-
-    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
-    /// stream of [Message][Topic::Message]s.
-    ///
-    /// If you subscribe to the same topic multiple times, the previous subscription
-    /// will be closed (there can be only one). This does not apply to subscriptions
-    /// created with `subscribe_multi`. This also WILL close subscriptions opened by
-    /// [`subscribe_exclusive`](Self::subscribe_exclusive).
-    ///
-    /// Returns an Error if the I/O worker is closed.
-    #[deprecated = "In future versions, `subscribe` will be removed. Use `subscribe_multi` or `subscribe_exclusive` instead."]
-    pub async fn subscribe<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<Subscription<T::Message, Wired>, IoClosed>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_inner::<T>(depth);
-        select! {
-            _ = cancel_fut => Err(IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe]
-    async fn subscribe_inner<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<Subscription<T::Message, Wired>, IoClosed>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let (tx, rx) = tokio::sync::mpsc::channel(depth);
-        {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(IoClosed);
-            }
-            if let Some(entry) = guard
-                .exclusive_list
-                .iter_mut()
-                .find(|(k, _)| *k == T::TOPIC_KEY)
-            {
-                if !entry.1.is_closed() {
-                    tracing::warn!("replacing subscription for topic path '{}'", T::PATH);
-                }
-                entry.1 = tx;
-            } else {
-                guard.exclusive_list.push((T::TOPIC_KEY, tx));
-            }
-        }
-        Ok(Subscription {
-            rx,
-            _pd: PhantomData,
-            _hm: PhantomData,
-        })
-    }
-
-    /// Subscribe to the given [`Key`], without automatically handling deserialization.
-    ///
-    /// If you subscribe to the same topic multiple times, the previous subscription
-    /// will be closed (there can be only one). This does not apply to subscriptions
-    /// created with `subscribe_multi`.
-    ///
-    /// Returns an Error if the I/O worker is closed.
-    #[deprecated = "In future versions, `subscribe_raw` will be removed. Use `subscribe_multi_raw` or `subscribe_exclusive_raw` instead."]
-    pub async fn subscribe_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawSubscription<Wired>, IoClosed> {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_inner_raw(key, depth);
-        select! {
-            _ = cancel_fut => Err(IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe_raw]
-    async fn subscribe_inner_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawSubscription<Wired>, IoClosed> {
-        let (tx, rx) = tokio::sync::mpsc::channel(depth);
-        {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(IoClosed);
-            }
-            if let Some(entry) = guard.exclusive_list.iter_mut().find(|(k, _)| *k == key) {
-                if !entry.1.is_closed() {
-                    tracing::warn!("replacing subscription for raw topic key '{:?}'", key);
-                }
-                entry.1 = tx;
-            } else {
-                guard.exclusive_list.push((key, tx));
-            }
-        }
-        Ok(RawSubscription {
-            rx,
-            _hm: PhantomData,
-        })
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Subscribe Exclusive
-    ///////////////////////////////////////////////////////////////////////////
-
-    /// Begin listening to a [Topic], receiving a [Subscription] that will give a
-    /// stream of [Message][Topic::Message]s.
-    ///
-    /// If you try to subscribe to the same topic multiple times, this function returns a
-    /// [`SubscribeError::AlreadySubscribed`] (there can be only one).
-    /// This does not apply to subscriptions created with `subscribe_multi`.
-    ///
-    /// Returns an Error if the I/O worker is closed.
-    pub async fn subscribe_exclusive<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<Subscription<T::Message, Wired>, SubscribeError>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_inner_exclusive::<T>(depth);
-        select! {
-            _ = cancel_fut => Err(SubscribeError::IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe_exclusive]
-    async fn subscribe_inner_exclusive<T: Topic>(
-        &self,
-        depth: usize,
-    ) -> Result<Subscription<T::Message, Wired>, SubscribeError>
-    where
-        T::Message: DeserializeOwned,
-    {
-        let (tx, rx) = tokio::sync::mpsc::channel(depth);
-        {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(SubscribeError::IoClosed);
-            }
-            if let Some(entry) = guard
-                .exclusive_list
-                .iter_mut()
-                .find(|(k, _)| *k == T::TOPIC_KEY)
-            {
-                if !entry.1.is_closed() {
-                    return Err(SubscribeError::AlreadySubscribed);
-                }
-                entry.1 = tx;
-            } else {
-                guard.exclusive_list.push((T::TOPIC_KEY, tx));
-            }
-        }
-        Ok(Subscription {
-            rx,
-            _pd: PhantomData,
-            _hm: PhantomData,
-        })
-    }
-
-    /// Subscribe to the given [`Key`], without automatically handling deserialization.
-    ///
-    /// If you try to subscribe to the same topic multiple times, this function returns a
-    /// [`SubscribeError::AlreadySubscribed`] (there can be only one).
-    /// This does not apply to subscriptions created with `subscribe_multi`.
-    ///
-    /// Returns an Error if the I/O worker is closed.
-    pub async fn subscribe_exclusive_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawSubscription<Wired>, SubscribeError> {
-        let cancel_fut = self.stopper.wait_stopped();
-        let operate_fut = self.subscribe_inner_exclusive_raw(key, depth);
-        select! {
-            _ = cancel_fut => Err(SubscribeError::IoClosed),
-            res = operate_fut => res,
-        }
-    }
-
-    /// Inner function version of [Self::subscribe_exclusive_raw]
-    async fn subscribe_inner_exclusive_raw(
-        &self,
-        key: Key,
-        depth: usize,
-    ) -> Result<RawSubscription<Wired>, SubscribeError> {
-        let (tx, rx) = tokio::sync::mpsc::channel(depth);
-        {
-            let mut guard = self.subscriptions.lock().await;
-            if guard.stopped {
-                return Err(SubscribeError::IoClosed);
-            }
-            if let Some(entry) = guard.exclusive_list.iter_mut().find(|(k, _)| *k == key) {
-                if !entry.1.is_closed() {
-                    return Err(SubscribeError::AlreadySubscribed);
-                }
-                entry.1 = tx;
-            } else {
-                guard.exclusive_list.push((key, tx));
-            }
-        }
-        Ok(RawSubscription {
-            rx,
-            _hm: PhantomData,
-        })
-    }
-
     /// Permanently close the connection to the client
     ///
     /// All other HostClients sharing the connection (e.g. created by cloning
@@ -798,6 +749,33 @@ where
     /// Wait for the host client to be closed
     pub async fn wait_closed(&self) {
         self.stopper.wait_stopped().await;
+    }
+}
+
+/// # Interface Methods
+impl<WireErr> HostClient<WireErr, Wired>
+where
+    WireErr: DeserializeOwned + Schema,
+{
+    /// Send a message of type [Endpoint::Request][Endpoint] to `path`, and await
+    /// a response of type [Endpoint::Response][Endpoint] (or WireErr) to `path`.
+    ///
+    /// This function will wait potentially forever. Consider using with a timeout.
+    pub async fn send_request<E: Endpoint>(
+        &self,
+        t: &E::Request,
+    ) -> Result<E::Response, HostErr<WireErr>>
+    where
+        E::Request: Serialize + Schema,
+        E::Response: DeserializeOwned + Schema,
+    {
+        self.send_request_to::<E>(<Wired as HeaderMode>::HeaderType::broadcast(), t)
+            .await
+    }
+    /// Obtain a [`SchemaReport`] describing the connected device
+    pub async fn get_schema_report(&self) -> Result<SchemaReport, SchemaError<WireErr>> {
+        self.get_schema_report_from(<Wired as HeaderMode>::HeaderType::broadcast())
+            .await
     }
 }
 
@@ -877,9 +855,10 @@ pub enum MultiSubRxError {
     Lagged(u64),
 }
 
-impl<M> MultiSubscription<M, Wired>
+impl<M, Mode> MultiSubscription<M, Mode>
 where
     M: DeserializeOwned,
+    Mode: HeaderMode,
 {
     /// Await a message for the given subscription.
     ///

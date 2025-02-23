@@ -33,7 +33,7 @@ use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq},
     DeviceMap, Key, TopicDirection,
 };
 
@@ -203,52 +203,53 @@ where
             _hm: PhantomData,
         }
     }
-}
 
-impl<Tx: WireTx> Sender<Tx, Wired>
-where
-    Tx: WireTx<Mode = Wired>,
-{
     /// Send a reply for the given endpoint
     #[inline]
-    pub async fn reply<E>(&self, seq_no: VarSeq, resp: &E::Response) -> Result<(), Tx::Error>
+    pub async fn reply<E>(
+        &self,
+        req_header: &Mode::HeaderType,
+        resp: &E::Response,
+    ) -> Result<(), Tx::Error>
     where
         E: crate::Endpoint,
         E::Response: Serialize + Schema,
     {
         let mut key = VarKey::Key8(E::RESP_KEY);
         key.shrink_to(self.kkind);
-        let wh = WiredHeader { key, seq_no };
+        let wh = req_header.into_response(key);
         self.tx.send::<E::Response>(wh, resp).await
     }
+
     /// Send a reply with the given Key
     ///
     /// This is useful when replying with "unusual" keys, for example Error responses
     /// not tied to any specific Endpoint.
     #[inline]
-    pub async fn reply_keyed<T>(&self, seq_no: VarSeq, key: Key, resp: &T) -> Result<(), Tx::Error>
+    pub async fn reply_keyed<T>(
+        &self,
+        req_header: &Mode::HeaderType,
+        key: Key,
+        resp: &T,
+    ) -> Result<(), Tx::Error>
     where
         T: ?Sized,
         T: Serialize + Schema,
     {
         let mut key = VarKey::Key8(key);
         key.shrink_to(self.kkind);
-        let wh = WiredHeader { key, seq_no };
+        let wh = req_header.into_response(key);
         self.tx.send::<T>(wh, resp).await
     }
 
-    /// Publish a Topic message
-    #[inline]
-    pub async fn publish<T>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), Tx::Error>
-    where
-        T: ?Sized,
-        T: crate::Topic,
-        T::Message: Serialize + Schema,
-    {
-        let mut key = VarKey::Key8(T::TOPIC_KEY);
-        key.shrink_to(self.kkind);
-        let wh = WiredHeader { key, seq_no };
-        self.tx.send::<T::Message>(wh, msg).await
+    /// Send a single error message
+    pub async fn error(
+        &self,
+        req_header: &Mode::HeaderType,
+        error: crate::standard_icd::WireError,
+    ) -> Result<(), Tx::Error> {
+        self.reply_keyed(req_header, crate::standard_icd::ERROR_KEY, &error)
+            .await
     }
 
     /// Log a `str` directly to the [`LoggingTopic`][crate::standard_icd::LoggingTopic]
@@ -263,20 +264,24 @@ where
         self.tx.send_log_fmt(self.kkind, msg).await
     }
 
-    /// Send a single error message
-    pub async fn error(
-        &self,
-        seq_no: VarSeq,
-        error: crate::standard_icd::WireError,
-    ) -> Result<(), Tx::Error> {
-        self.reply_keyed(seq_no, crate::standard_icd::ERROR_KEY, &error)
-            .await
+    /// Publish a Topic message
+    #[inline]
+    pub async fn publish<T>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), Tx::Error>
+    where
+        T: ?Sized,
+        T: crate::Topic,
+        T::Message: Serialize + Schema,
+    {
+        let mut key = VarKey::Key8(T::TOPIC_KEY);
+        key.shrink_to(self.kkind);
+        let wh = Mode::HeaderType::new_for_topic_broadcast(key, seq_no); // using this builder pattern means any type of header can be used!
+        self.tx.send::<T::Message>(wh, msg).await
     }
 
     /// Implements the [`GetAllSchemasEndpoint`][crate::standard_icd::GetAllSchemasEndpoint] endpoint
     pub async fn send_all_schemas(
         &self,
-        hdr: &VarHeader,
+        hdr: &Mode::HeaderType,
         device_map: &DeviceMap,
     ) -> Result<(), Tx::Error> {
         #[cfg(feature = "use-std")]
@@ -359,7 +364,7 @@ where
 
         // Finally, reply with the totals
         self.reply::<GetAllSchemasEndpoint>(
-            hdr.seq_no,
+            hdr,
             &SchemaTotals {
                 types_sent: device_map.types.len() as u32,
                 endpoints_sent: device_map.endpoints.len() as u32,

@@ -13,7 +13,7 @@ use tokio::{
 
 use postcard_rpc::{
     define_dispatch, endpoints,
-    header::{VarHeader, VarSeq, VarSeqKind},
+    header::{VarHeader, VarSeq, VarSeqKind, Wired},
     host_client::test_channels as client,
     server::{
         impls::test_channels::{
@@ -129,6 +129,7 @@ define_dispatch! {
     app: SingleDispatcher;
     spawn_fn: spawn_fn;
     tx_impl: WireTxImpl;
+    hd_mode: Wired;
     spawn_impl: WireSpawnImpl;
     context: TestContext;
 
@@ -179,7 +180,7 @@ fn test_zeta_blocking(
     context: &mut TestContext,
     _header: VarHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
@@ -188,7 +189,7 @@ fn test_borrow_blocking(
     context: &mut TestContext,
     _header: VarHeader,
     _body: Message,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
@@ -197,7 +198,7 @@ async fn test_zeta_async(
     context: &mut TestContext,
     _header: VarHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
@@ -206,7 +207,7 @@ async fn test_zeta_spawn(
     context: TestSpawnContext,
     _header: VarHeader,
     _body: ZMsg,
-    _out: Sender<ChannelWireTx>,
+    _out: Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
@@ -220,11 +221,11 @@ async fn test_beta_handler(
     context: TestSpawnContext,
     header: VarHeader,
     body: BReq,
-    out: Sender<ChannelWireTx>,
+    out: Sender<ChannelWireTx, Wired>,
 ) {
     context.ctr.fetch_add(1, Ordering::Relaxed);
     let _ = out
-        .reply::<BetaEndpoint>(header.seq_no, &BResp(body.0.into()))
+        .reply::<BetaEndpoint>(&header, &BResp(body.0.into()))
         .await;
 }
 

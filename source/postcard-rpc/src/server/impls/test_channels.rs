@@ -28,7 +28,7 @@ use tokio::{select, sync::mpsc};
 pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
-        header::{HeaderImpl, HeaderMode, VarKeyKind, Wired, WiredHeader, Wireless},
+        header::{VarKeyKind, Wired},
         server::{Dispatch, Server},
     };
 

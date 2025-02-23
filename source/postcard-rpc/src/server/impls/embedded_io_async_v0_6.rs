@@ -2,7 +2,7 @@
 use core::{fmt::Arguments, ops::DerefMut};
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -116,6 +116,7 @@ where
     Tx: Write + 'static,
 {
     type Error = WireTxErrorKind;
+    type Mode = Wired;
 
     async fn send<T: Serialize + ?Sized>(
         &self,

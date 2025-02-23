@@ -52,7 +52,7 @@ impl From<UsbTransferStatus> for Error {
     }
 }
 
-impl<WireErr> HostClient<WireErr>
+impl<WireErr> HostClient<WireErr, Wired>
 where
     WireErr: DeserializeOwned + Schema,
 {

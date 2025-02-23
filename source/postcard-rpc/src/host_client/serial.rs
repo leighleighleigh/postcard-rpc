@@ -32,7 +32,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::VarSeqKind;
+    /// use postcard_rpc::header::{VarSeqKind,Wired};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -43,7 +43,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::new_serial_cobs(
+    /// let client = HostClient::<Error,Wired>::new_serial_cobs(
     ///     // the serial port path
     ///     "/dev/ttyACM0",
     ///     // the URI/path for `Error` messages
@@ -70,7 +70,7 @@ where
 
         let (rx, tx) = tokio::io::split(port);
 
-        Ok(HostClient::new_with_wire(
+        Ok(HostClient::<WireErr, Wired>::new_with_wire(
             SerialWireTx { tx },
             SerialWireRx {
                 rx,

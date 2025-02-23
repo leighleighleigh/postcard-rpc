@@ -60,7 +60,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::VarSeqKind;
+    /// use postcard_rpc::header::{VarSeqKind,Wired};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -71,7 +71,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::try_new_raw_nusb(
+    /// let client = HostClient::<Error,Wired>::try_new_raw_nusb(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // the URI/path for `Error` messages
@@ -170,7 +170,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::VarSeqKind;
+    /// use postcard_rpc::header::{VarSeqKind,Wired};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -181,7 +181,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::try_new_raw_nusb_with_interface(
+    /// let client = HostClient::<Error,Wired>::try_new_raw_nusb_with_interface(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // Find the "Vendor Specific" interface
@@ -269,7 +269,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::VarSeqKind;
+    /// use postcard_rpc::header::{VarSeqKind,Wired};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -280,7 +280,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::new_raw_nusb(
+    /// let client = HostClient::<Error,Wired>::new_raw_nusb(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // the URI/path for `Error` messages

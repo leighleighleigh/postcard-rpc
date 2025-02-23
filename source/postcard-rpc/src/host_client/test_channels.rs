@@ -1,7 +1,7 @@
 //! A Client implementation using channels for testing
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarSeqKind, Wired},
+    header::{HeaderMode, VarSeqKind},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
     standard_icd::WireError,
 };

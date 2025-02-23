@@ -12,7 +12,7 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarKey, VarSeqKind},
+    header::{HeaderImpl, HeaderImplMeta, HeaderMode, VarKey, VarSeqKind},
     host_client::{
         HostClient, HostContext, ProcessError, RpcFrame, WireContext, WireRx, WireSpawn, WireTx,
     },
@@ -263,7 +263,7 @@ async fn in_worker_inner<W, Mode>(
 
         {
             let mut subs_guard = subscriptions.lock().await;
-            let key = hdr.varkey().clone();
+            let key = hdr.key().clone();
 
             // Remove if sending fails
             //

@@ -15,6 +15,8 @@
 ///     spawn_fn: spawn_fn;
 ///     // This is the WireTx impl
 ///     tx_impl: WireTxImpl;
+///     // This is the header mode
+///     hd_mode: impl HeaderMode;
 ///     // This is the WireSpawn impl
 ///     spawn_impl: WireSpawnImpl;
 ///     // This is the TestContext you define to be passed to all handlers
@@ -59,9 +61,9 @@ macro_rules! define_dispatch {
     (@ep_arm blocking ($endpoint:ty) $handler:ident $context:ident $header:ident $req:ident $outputter:ident ($spawn_fn:path) $spawner:ident) => {
         {
             let reply = $handler($context, $header.clone(), $req);
-            if $outputter.reply::<$endpoint>($header.seq_no, &reply).await.is_err() {
+            if $outputter.reply::<$endpoint>($header, &reply).await.is_err() {
                 let err = $crate::standard_icd::WireError::SerFailed;
-                $outputter.error($header.seq_no, err).await
+                $outputter.error($header, err).await
             } else {
                 Ok(())
             }
@@ -71,9 +73,9 @@ macro_rules! define_dispatch {
     (@ep_arm async ($endpoint:ty) $handler:ident $context:ident $header:ident $req:ident $outputter:ident ($spawn_fn:path) $spawner:ident) => {
         {
             let reply = $handler($context, $header.clone(), $req).await;
-            if $outputter.reply::<$endpoint>($header.seq_no, &reply).await.is_err() {
+            if $outputter.reply::<$endpoint>($header, &reply).await.is_err() {
                 let err = $crate::standard_icd::WireError::SerFailed;
-                $outputter.error($header.seq_no, err).await
+                $outputter.error($header, err).await
             } else {
                 Ok(())
             }
@@ -85,7 +87,7 @@ macro_rules! define_dispatch {
             let context = $crate::server::SpawnContext::spawn_ctxt($context);
             if $spawn_fn($spawner, $handler(context, $header.clone(), $req, $outputter.clone())).is_err() {
                 let err = $crate::standard_icd::WireError::FailedToSpawn;
-                $outputter.error($header.seq_no, err).await
+                $outputter.error($header, err).await
             } else {
                 Ok(())
             }
@@ -122,13 +124,14 @@ macro_rules! define_dispatch {
     // is N, where N is 1, 2, 4, or 8
     //////////////////////////////////////////////////////////////////////////////
     (@matcher
-        $n:literal $app_name:ident $tx_impl:ty; $spawn_fn:ident $key_ty:ty; $key_kind:expr;
+        $n:literal $app_name:ident $tx_impl:ty; $hd_mode:ty; $spawn_fn:ident $key_ty:ty; $key_kind:expr;
         $req_key_name:ident / $topic_key_name:ident = $bytes_ty:ty;
         ($($endpoint:ty | $ep_flavor:tt | $ep_handler:ident)*)
         ($($topic_in:ty | $tp_flavor:tt | $tp_handler:ident)*)
     ) => {
         impl $crate::server::Dispatch for $app_name<$n> {
             type Tx = $tx_impl;
+            type Mode = $hd_mode;
 
             fn min_key_len(&self) -> $crate::header::VarKeyKind {
                 $key_kind
@@ -137,14 +140,14 @@ macro_rules! define_dispatch {
             /// Handle dispatching of a single frame
             async fn handle(
                 &mut self,
-                tx: &$crate::server::Sender<Self::Tx>,
-                hdr: &$crate::header::VarHeader,
+                tx: &$crate::server::Sender<Self::Tx,Self::Mode>,
+                hdr: &<Self::Mode as $crate::header::HeaderMode>::HeaderType,
                 body: &[u8],
             ) -> Result<(), <Self::Tx as $crate::server::WireTx>::Error> {
                 let key = hdr.key;
                 let Ok(keyb) = <$key_ty>::try_from(&key) else {
                     let err = $crate::standard_icd::WireError::KeyTooSmall;
-                    return tx.error(hdr.seq_no, err).await;
+                    return tx.error(hdr, err).await;
                 };
                 match keyb {
                     // Standard ICD endpoints
@@ -152,10 +155,10 @@ macro_rules! define_dispatch {
                         // Can we deserialize the request?
                         let Ok(req) = postcard::from_bytes::<<$crate::standard_icd::PingEndpoint as $crate::Endpoint>::Request>(body) else {
                             let err = $crate::standard_icd::WireError::DeserFailed;
-                            return tx.error(hdr.seq_no, err).await;
+                            return tx.error(hdr, err).await;
                         };
 
-                        tx.reply::<$crate::standard_icd::PingEndpoint>(hdr.seq_no, &req).await
+                        tx.reply::<$crate::standard_icd::PingEndpoint>(hdr, &req).await
                     },
                     <$crate::standard_icd::GetAllSchemasEndpoint as $crate::Endpoint>::$req_key_name => {
                         tx.send_all_schemas(hdr, self.device_map).await
@@ -166,7 +169,7 @@ macro_rules! define_dispatch {
                             // Can we deserialize the request?
                             let Ok(req) = postcard::from_bytes::<<$endpoint as $crate::Endpoint>::Request>(body) else {
                                 let err = $crate::standard_icd::WireError::DeserFailed;
-                                return tx.error(hdr.seq_no, err).await;
+                                return tx.error(hdr, err).await;
                             };
 
                             // Store some items as named bindings, so we can use `ident` in the
@@ -206,7 +209,7 @@ macro_rules! define_dispatch {
                     _other => {
                         // huh! We have no idea what this key is supposed to be!
                         let err = $crate::standard_icd::WireError::UnknownKey;
-                        tx.error(hdr.seq_no, err).await
+                        tx.error(hdr, err).await
                     },
                 }
             }
@@ -221,6 +224,7 @@ macro_rules! define_dispatch {
 
         spawn_fn: $spawn_fn:ident;
         tx_impl: $tx_impl:ty;
+        hd_mode: $hd_mode:ty;
         spawn_impl: $spawn_impl:ty;
         context: $context_ty:ty;
 
@@ -439,25 +443,25 @@ macro_rules! define_dispatch {
             }
 
             $crate::define_dispatch! {
-                @matcher 1 $app_name $tx_impl; $spawn_fn $crate::Key1; $crate::header::VarKeyKind::Key1;
+                @matcher 1 $app_name $tx_impl; $hd_mode; $spawn_fn $crate::Key1; $crate::header::VarKeyKind::Key1;
                 REQ_KEY1 / TOPIC_KEY1 = u8;
                 ($($endpoint | $ep_flavor | $ep_handler)*)
                 ($($topic_in | $tp_flavor | $tp_handler)*)
             }
             $crate::define_dispatch! {
-                @matcher 2 $app_name $tx_impl; $spawn_fn $crate::Key2; $crate::header::VarKeyKind::Key2;
+                @matcher 2 $app_name $tx_impl; $hd_mode; $spawn_fn $crate::Key2; $crate::header::VarKeyKind::Key2;
                 REQ_KEY2 / TOPIC_KEY2 = [u8; 2];
                 ($($endpoint | $ep_flavor | $ep_handler)*)
                 ($($topic_in | $tp_flavor | $tp_handler)*)
             }
             $crate::define_dispatch! {
-                @matcher 4 $app_name $tx_impl; $spawn_fn $crate::Key4; $crate::header::VarKeyKind::Key4;
+                @matcher 4 $app_name $tx_impl; $hd_mode; $spawn_fn $crate::Key4; $crate::header::VarKeyKind::Key4;
                 REQ_KEY4 / TOPIC_KEY4 = [u8; 4];
                 ($($endpoint | $ep_flavor | $ep_handler)*)
                 ($($topic_in | $tp_flavor | $tp_handler)*)
             }
             $crate::define_dispatch! {
-                @matcher 8 $app_name $tx_impl; $spawn_fn $crate::Key; $crate::header::VarKeyKind::Key8;
+                @matcher 8 $app_name $tx_impl; $hd_mode; $spawn_fn $crate::Key; $crate::header::VarKeyKind::Key8;
                 REQ_KEY / TOPIC_KEY = [u8; 8];
                 ($($endpoint | $ep_flavor | $ep_handler)*)
                 ($($topic_in | $tp_flavor | $tp_handler)*)

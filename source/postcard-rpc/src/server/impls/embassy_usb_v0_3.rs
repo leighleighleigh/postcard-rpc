@@ -1,7 +1,7 @@
 //! Implementation using `embassy-usb` and bulk interfaces
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -255,6 +255,7 @@ impl<M: RawMutex + 'static, D: Driver<'static> + 'static> HeaderMode for EUsbWir
 
 impl<M: RawMutex + 'static, D: Driver<'static> + 'static> WireTx for EUsbWireTx<M, D> {
     type Error = WireTxErrorKind;
+    type Mode = Wired;
 
     async fn send<T: Serialize + ?Sized>(
         &self,
@@ -652,7 +653,10 @@ pub mod fake {
         server::{Sender, SpawnContext},
         topics,
     };
-    use crate::{header::VarHeader, Schema};
+    use crate::{
+        header::{VarHeader, Wired},
+        Schema,
+    };
     use embassy_usb_driver::{Bus, ControlPipe, EndpointIn, EndpointOut};
     use serde::{Deserialize, Serialize};
 
@@ -894,6 +898,7 @@ pub mod fake {
         app: SingleDispatcher;
         spawn_fn: spawn_fn;
         tx_impl: WireTxImpl<FakeMutex, FakeDriver>;
+        hd_mode: Wired;
         spawn_impl: WireSpawnImpl;
         context: TestContext;
 
@@ -952,7 +957,7 @@ pub mod fake {
         _context: TestSpawnContext,
         _header: VarHeader,
         _body: EReq,
-        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>>,
+        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>, Wired>,
     ) {
         todo!()
     }

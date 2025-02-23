@@ -10,10 +10,7 @@ use tokio::{sync::mpsc, task::yield_now, time::timeout};
 
 use postcard_rpc::{
     define_dispatch, endpoints,
-    header::{
-        HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind, Wired,
-        WiredHeader, Wireless,
-    },
+    header::{HeaderImpl, VarKey, VarKeyKind, VarSeq, VarSeqKind, Wired, WiredHeader},
     host_client::{test_channels as client, HostClient},
     server::{
         impls::test_channels::{
@@ -131,6 +128,7 @@ define_dispatch! {
     app: SingleDispatcher;
     spawn_fn: spawn_fn;
     tx_impl: WireTxImpl;
+    hd_mode: Wired;
     spawn_impl: WireSpawnImpl;
     context: TestContext;
 
@@ -161,7 +159,7 @@ define_dispatch! {
 
 fn test_borrowep_blocking2(
     context: &mut TestContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: (),
 ) -> Message<'_> {
     Message {
@@ -171,7 +169,7 @@ fn test_borrowep_blocking2(
 
 fn test_borrowep_blocking(
     _context: &mut TestContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: Message<'_>,
 ) -> u8 {
     0
@@ -179,54 +177,54 @@ fn test_borrowep_blocking(
 
 fn test_zeta_blocking(
     context: &mut TestContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 fn test_borrow_blocking(
     context: &mut TestContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: Message,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 async fn test_zeta_async(
     context: &mut TestContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx>,
+    _out: &Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 async fn test_zeta_spawn(
     context: TestSpawnContext,
-    _header: VarHeader,
+    _header: WiredHeader,
     _body: ZMsg,
-    _out: Sender<ChannelWireTx>,
+    _out: Sender<ChannelWireTx, Wired>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
-async fn test_alpha_handler(context: &mut TestContext, _header: VarHeader, body: AReq) -> AResp {
+async fn test_alpha_handler(context: &mut TestContext, _header: WiredHeader, body: AReq) -> AResp {
     context.ctr.fetch_add(1, Ordering::Relaxed);
     AResp(body.0)
 }
 
 async fn test_beta_handler(
     context: TestSpawnContext,
-    header: VarHeader,
+    header: WiredHeader,
     body: BReq,
-    out: Sender<ChannelWireTx>,
+    out: Sender<ChannelWireTx, Wired>,
 ) {
     context.ctr.fetch_add(1, Ordering::Relaxed);
     let _ = out
-        .reply::<BetaEndpoint>(header.seq_no, &BResp(body.0.into()))
+        .reply::<BetaEndpoint>(&header, &BResp(body.0.into()))
         .await;
 }
 
@@ -262,7 +260,7 @@ async fn smoke() {
     });
 
     // manually build request - Alpha
-    let mut msg = VarHeader {
+    let mut msg = WiredHeader {
         key: VarKey::Key8(AlphaEndpoint::REQ_KEY),
         seq_no: VarSeq::Seq4(123),
     }
@@ -273,14 +271,14 @@ async fn smoke() {
     let resp = client_rx.recv().await.unwrap();
 
     // manually extract response
-    let (hdr, body) = VarHeader::take_from_slice(&resp).unwrap();
+    let (hdr, body) = WiredHeader::take_from_slice(&resp).unwrap();
     let resp = postcard::from_bytes::<<AlphaEndpoint as Endpoint>::Response>(body).unwrap();
     assert_eq!(resp.0, 42);
     assert_eq!(hdr.key, VarKey::Key8(AlphaEndpoint::RESP_KEY));
     assert_eq!(hdr.seq_no, VarSeq::Seq4(123));
 
     // manually build request - Beta
-    let mut msg = VarHeader {
+    let mut msg = WiredHeader {
         key: VarKey::Key8(BetaEndpoint::REQ_KEY),
         seq_no: VarSeq::Seq4(234),
     }
@@ -291,7 +289,7 @@ async fn smoke() {
     let resp = client_rx.recv().await.unwrap();
 
     // manually extract response
-    let (hdr, body) = VarHeader::take_from_slice(&resp).unwrap();
+    let (hdr, body) = WiredHeader::take_from_slice(&resp).unwrap();
     let resp = postcard::from_bytes::<<BetaEndpoint as Endpoint>::Response>(body).unwrap();
     assert_eq!(resp.0, 1000);
     assert_eq!(hdr.key, VarKey::Key8(BetaEndpoint::RESP_KEY));
@@ -299,7 +297,7 @@ async fn smoke() {
 
     // blocking topic handler
     for i in 0..3 {
-        let mut msg = VarHeader {
+        let mut msg = WiredHeader {
             key: VarKey::Key8(ZetaTopic1::TOPIC_KEY),
             seq_no: VarSeq::Seq4(i),
         }
@@ -325,7 +323,7 @@ async fn smoke() {
 
     // async topic handler
     for i in 0..3 {
-        let mut msg = VarHeader {
+        let mut msg = WiredHeader {
             key: VarKey::Key8(ZetaTopic2::TOPIC_KEY),
             seq_no: VarSeq::Seq4(i),
         }
@@ -350,7 +348,7 @@ async fn smoke() {
 
     // spawn topic handler
     for i in 0..3 {
-        let mut msg = VarHeader {
+        let mut msg = WiredHeader {
             key: VarKey::Key8(ZetaTopic3::TOPIC_KEY),
             seq_no: VarSeq::Seq4(i),
         }
@@ -408,9 +406,9 @@ async fn end_to_end() {
 
     let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
 
-    let resp = cli.send_resp::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
-    let resp = cli.send_resp::<BetaEndpoint>(&BReq(1234)).await.unwrap();
+    let resp = cli.send_request::<BetaEndpoint>(&BReq(1234)).await.unwrap();
     assert_eq!(resp.0, 1234);
 }
 
@@ -500,9 +498,9 @@ async fn end_to_end_force8() {
 
     let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq4);
 
-    let resp = cli.send_resp::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
-    let resp = cli.send_resp::<BetaEndpoint>(&BReq(1234)).await.unwrap();
+    let resp = cli.send_request::<BetaEndpoint>(&BReq(1234)).await.unwrap();
     assert_eq!(resp.0, 1234);
 }
 
@@ -602,7 +600,7 @@ async fn end_to_end_stoppable() {
 
     let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
 
-    let resp = cli.send_resp::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
     stopper.stop();
     match timeout(Duration::from_millis(100), hdl).await {
