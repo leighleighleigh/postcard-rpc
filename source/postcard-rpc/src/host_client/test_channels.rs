@@ -1,7 +1,7 @@
 //! A Client implementation using channels for testing
 
 use crate::{
-    header::{VarSeqKind, Wired, HeaderImpl, HeaderMode},
+    header::{HeaderImpl, HeaderMode, VarSeqKind, Wired},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
     standard_icd::WireError,
 };
@@ -13,8 +13,11 @@ pub fn new_from_channels<Mode>(
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
     seq_kind: VarSeqKind,
-) -> HostClient<WireError, Mode> where Mode: HeaderMode + Send {
-    HostClient::<WireError,Mode>::new_with_wire(
+) -> HostClient<WireError, Mode>
+where
+    Mode: HeaderMode + Send,
+{
+    HostClient::<WireError, Mode>::new_with_wire(
         ChannelTx { tx },
         ChannelRx { rx },
         TokSpawn,

@@ -8,7 +8,7 @@ use core::{
 use std::sync::Arc;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
     host_client::util::Stopper,
     server::{
         AsWireRxErrorKind, AsWireTxErrorKind, WireRx, WireRxErrorKind, WireSpawn, WireTx,
@@ -28,7 +28,7 @@ use tokio::{select, sync::mpsc};
 pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
-        header::{VarKeyKind, Wired},
+        header::{HeaderImpl, HeaderMode, VarKeyKind, Wired, WiredHeader, Wireless},
         server::{Dispatch, Server},
     };
 
@@ -61,7 +61,7 @@ pub mod dispatch_impl {
         settings: Settings,
     ) -> crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D, Wired>
     where
-        D: Dispatch<Tx = WireTxImpl>,
+        D: Dispatch<Tx = WireTxImpl, Mode = Wired>,
     {
         let buf = vec![0; settings.buf];
         Server::new(
@@ -84,7 +84,7 @@ pub mod dispatch_impl {
         Stopper,
     )
     where
-        D: Dispatch<Tx = WireTxImpl>,
+        D: Dispatch<Tx = WireTxImpl, Mode = Wired>,
     {
         let stopper = Stopper::new();
         settings.tx.set_stopper(stopper.clone());
@@ -155,12 +155,16 @@ impl HeaderMode for ChannelWireTx {
     type HeaderType = WiredHeader;
 }
 
+// works around a silly bug: https://github.com/rust-lang/rust/issues/86935
+type Type<T> = T;
+
 impl WireTx for ChannelWireTx {
     type Error = ChannelWireTxError;
+    type Mode = Wired;
 
     async fn send<T: serde::Serialize + ?Sized>(
         &self,
-        hdr: crate::header::VarHeader,
+        hdr: <Self::Mode as HeaderMode>::HeaderType,
         msg: &T,
     ) -> Result<(), Self::Error> {
         let mut hdr_ser = hdr.write_to_vec();
@@ -182,7 +186,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Self::HeaderType {
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType> {
             key,
             seq_no: VarSeq::Seq4(ctr),
         };
@@ -204,7 +208,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Self::HeaderType {
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType> {
             key,
             seq_no: VarSeq::Seq4(ctr),
         };

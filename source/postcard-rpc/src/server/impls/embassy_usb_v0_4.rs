@@ -1,7 +1,7 @@
 //! Implementation using `embassy-usb` and bulk interfaces
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq, HeaderImpl, HeaderMode, Wired, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,

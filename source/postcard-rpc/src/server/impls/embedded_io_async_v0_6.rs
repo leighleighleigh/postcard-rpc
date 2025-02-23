@@ -2,7 +2,7 @@
 use core::{fmt::Arguments, ops::DerefMut};
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq, HeaderImpl, HeaderMode, WiredHeader},
+    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, WiredHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -78,7 +78,6 @@ where
 {
     type HeaderType = WiredHeader;
 }
-
 
 fn flava_flav(buf: &'_ mut [u8]) -> Result<Cobs<Slice<'_>>, WireTxErrorKind> {
     Cobs::try_new(Slice::new(buf)).map_err(|_| WireTxErrorKind::ConnectionClosed)

@@ -8,7 +8,7 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 use crate::{
     accumulator::raw::{CobsAccumulator, FeedResult},
-    header::{VarSeqKind, Wired,HeaderImpl,HeaderMode},
+    header::{HeaderImpl, HeaderMode, VarSeqKind, Wired},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 
@@ -17,7 +17,7 @@ use crate::{
 /// These methods are used to create a new [HostClient] instance for use with tokio serial and cobs encoding.
 ///
 /// **Requires feature**: `cobs-serial`
-impl<WireErr> HostClient<WireErr,Wired>
+impl<WireErr> HostClient<WireErr, Wired>
 where
     WireErr: DeserializeOwned + Schema,
 {
