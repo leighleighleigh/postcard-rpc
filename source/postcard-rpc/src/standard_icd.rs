@@ -131,6 +131,7 @@ endpoints! {
     | ----------            | ---------     | ----------    | ----                       |
     | PingEndpoint          | u32           | u32           | "postcard-rpc/ping"        |
     | GetAllSchemasEndpoint | ()            | SchemaTotals  | "postcard-rpc/schemas/get" |
+    | RawFrameProxy         | ()            | ()            | "postcard-rpc/proxy/raw"   |
 }
 
 topics! {

@@ -162,7 +162,19 @@ macro_rules! define_dispatch {
                     },
                     <$crate::standard_icd::GetAllSchemasEndpoint as $crate::Endpoint>::$req_key_name => {
                         tx.send_all_schemas(hdr, self.device_map).await
-                    }
+                    },
+                    <$crate::standard_icd::RawFrameProxy as $crate::Endpoint>::$req_key_name => {
+                        // This type of frame gets deserialized by the sender 'from_proxied_bytes' method,
+                        // which attempts to deserialize the body into an inner RpcFrame<OtherMode>.
+                        // If that works, we can call self.handle on the inner frame ;) nice!
+                        let Ok(_frame) = tx.from_proxied_bytes(hdr, body) else {
+                            let err = $crate::standard_icd::WireError::DeserFailed;
+                            return tx.error(hdr, err).await;
+                        };
+                        // hmm somethign isnt quite working here. todo.
+                        // self.handle(tx, frame.header, &frame.body).await
+                        Ok(())
+                    },
                     // end
                     $(
                         <$endpoint as $crate::Endpoint>::$req_key_name => {

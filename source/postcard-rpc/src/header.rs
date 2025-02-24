@@ -396,6 +396,14 @@ impl From<[u8; 6]> for MacAddress {
     }
 }
 
+impl From<&[u8; 6]> for MacAddress {
+    fn from(value: &[u8; 6]) -> Self {
+        Self {
+            mac_address: value.clone(),
+        }
+    }
+}
+
 #[cfg(feature = "use-std")]
 impl core::fmt::Debug for MacAddress {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -789,20 +797,42 @@ impl Addressable for WirelessHeader {
 impl HeaderImpl for WirelessHeader {
     #[cfg(feature = "use-std")]
     fn write_to_vec(&self) -> Vec<u8> {
-        self.vh.write_to_vec()
+        let mut vhvec = self.vh.write_to_vec();
+        vhvec.append(&mut self.src.mac_address.to_vec());
+        vhvec.append(&mut self.dst.mac_address.to_vec());
+        vhvec
     }
 
     fn write_to_slice<'a>(&self, buf: &'a mut [u8]) -> Option<(&'a mut [u8], &'a mut [u8])> {
-        self.vh.write_to_slice(buf)
+        let ab = self.vh.write_to_slice(buf);
+        let (a, b) = ab?;
+        if b.len() < 12 {
+            return None;
+        }
+        // split for the src address, then the dst address
+        let (src, rest) = b.split_at_mut(6);
+        src.copy_from_slice(&self.src.mac_address);
+        let (dst, rest2) = rest.split_at_mut(6);
+        dst.copy_from_slice(&self.dst.mac_address);
+        // return the remaining slice
+        Some((a, rest2))
     }
 
     fn take_from_slice(buf: &[u8]) -> Option<(Self, &[u8])> {
         if let Some((vh, rest)) = VarHeader::take_from_slice(buf) {
+            // split for the src address, then the dst address
+            let (src, rest) = rest.split_at(6);
+            let src : [u8; 6] = src.try_into().unwrap();
+            let src_addr : MacAddress = src.into();
+            let (dst, rest) = rest.split_at(6);
+            let dst : [u8; 6] = dst.try_into().unwrap();
+            let dst_addr : MacAddress = dst.into();
+
             Some((
                 Self {
                     vh,
-                    src: MacAddress::default(),
-                    dst: MacAddress::default(),
+                    src: src_addr,
+                    dst: dst_addr,
                 },
                 rest,
             ))

@@ -33,8 +33,7 @@ use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq},
-    DeviceMap, Key, TopicDirection,
+    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader, Wireless, WirelessHeader}, host_client::RpcFrame, standard_icd, DeviceMap, Key, TopicDirection
 };
 
 use core::marker::PhantomData;
@@ -379,6 +378,58 @@ where
     }
 }
 
+///
+/// SENDER PROXY IMPLS
+///
+
+impl<Tx: WireTx> Sender<Tx, Wired>
+where
+    Tx: WireTx<Mode = Wired>,
+{
+    /// Turns some opaque bytes, which we assume are an RpcFrame<Wireless> (the opposite mode),
+    /// and attempts to deserialize it into a Wireless frame!
+    pub fn from_proxied_bytes(
+        &self,
+        _req_header: &WiredHeader,
+        body: &[u8],
+    ) -> Result<RpcFrame<Wireless>, standard_icd::WireError> {
+        match WirelessHeader::take_from_slice(&body) {
+            Some((h, b)) => {
+                Ok(RpcFrame::<Wireless>{
+                    header: h,
+                    body: b.to_vec(), 
+                    _hm: PhantomData,
+                })
+            }
+            None => return Err(standard_icd::WireError::DeserFailed),
+        }
+    }
+}
+
+impl<Tx: WireTx> Sender<Tx, Wireless>
+where
+    Tx: WireTx<Mode = Wireless>,
+{
+    /// Turns some opaque bytes, which we assume are an RpcFrame<Wireless> (the opposite mode),
+    /// and attempts to deserialize it into a Wireless frame!
+    pub fn from_proxied_bytes(
+        &self,
+        _req_header: &WirelessHeader,
+        body: &[u8],
+    ) -> Result<RpcFrame<Wired>, standard_icd::WireError> {
+        match WiredHeader::take_from_slice(&body) {
+            Some((h, b)) => {
+                Ok(RpcFrame::<Wired>{
+                    header: h,
+                    body: b.to_vec(), 
+                    _hm: PhantomData,
+                })
+            }
+            None => return Err(standard_icd::WireError::DeserFailed),
+        }
+    }
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // SERVER
 //////////////////////////////////////////////////////////////////////////////
@@ -490,7 +541,7 @@ where
 impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx + Clone,
-    Rx: WireRx,
+    Rx: WireRx + Clone,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
     Mode: HeaderMode,
@@ -498,6 +549,11 @@ where
     /// Get a copy of the [`Sender`] to pass to tasks that need it
     pub fn sender(&self) -> Sender<Tx, Mode> {
         self.tx.clone()
+    }
+    /// Gets a copy of the ['Rx'] channel to provide side-channel messages
+    /// to the server
+    pub fn receiver(&self) -> Rx {
+        self.rx.clone()
     }
 }
 
