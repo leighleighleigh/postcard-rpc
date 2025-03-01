@@ -12,9 +12,9 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    header::{HeaderImpl, HeaderImplMeta, HeaderMode, VarKey, VarSeqKind},
+    header::{Header, HeaderImplMeta, HeaderMode, VarKey, VarSeqKind},
     host_client::{
-        HostClient, HostContext, ProcessError, RpcFrame, WireContext, WireRx, WireSpawn, WireTx,
+        HostClient, HostContext, ProcessError, RpcMessage, WireContext, WireRx, WireSpawn, WireTx,
     },
     Key,
 };
@@ -22,14 +22,14 @@ use crate::{
 use core::marker::PhantomData;
 
 #[derive(Debug)]
-pub(crate) struct Subscriptions<Mode: HeaderMode> {
-    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcFrame<Mode>>)>,
-    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcFrame<Mode>>)>,
+pub(crate) struct Subscriptions<'a,Mode: HeaderMode> {
+    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcMessage<'a,Mode>>)>,
+    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcMessage<'a,Mode>>)>,
     pub(crate) stopped: bool,
     _hm: core::marker::PhantomData<Mode>,
 }
 
-impl<Mode> Default for Subscriptions<Mode>
+impl<'a,Mode> Default for Subscriptions<'a,Mode>
 where
     Mode: HeaderMode,
 {
@@ -144,14 +144,16 @@ where
         tx: WTX,
         rx: WRX,
         mut sp: WSP,
-        config: &HostClientConfig<'_>,
+        config: &HostClientConfig,
     ) -> Self
     where
         WTX: WireTx,
         WRX: WireRx,
         WSP: WireSpawn,
     {
-        let (me, wire_ctx) = Self::new_manual_priv(config);
+        // let (me, wire_ctx) = Self::new_manual_priv(config);
+        let me_wire_ctx : (HostClient<WireErr,Mode>,WireContext<Mode>) = Self::new_manual_priv(config);
+        let (me, wire_ctx) = me_wire_ctx;
 
         let WireContext {
             outgoing,
@@ -172,7 +174,7 @@ where
 }
 
 /// Output worker, feeding frames to the `Client`.
-async fn out_worker<W, Mode>(wire: W, rec: mpsc::Receiver<RpcFrame<Mode>>, stop: Stopper)
+async fn out_worker<'a, W, Mode>(wire: W, rec: mpsc::Receiver<RpcMessage<'a,Mode>>, stop: Stopper)
 where
     W: WireTx,
     W::Error: Debug,
@@ -190,7 +192,7 @@ where
     }
 }
 
-async fn out_worker_inner<W, Mode>(mut wire: W, mut rec: mpsc::Receiver<RpcFrame<Mode>>)
+async fn out_worker_inner<'a, W, Mode>(mut wire: W, mut rec: mpsc::Receiver<RpcMessage<'a,Mode>>)
 where
     W: WireTx,
     W::Error: Debug,
@@ -201,7 +203,7 @@ where
             tracing::warn!("Receiver Closed, this could be bad");
             return;
         };
-        if let Err(e) = wire.send(msg.to_bytes()).await {
+        if let Err(e) = wire.send(msg.to_vec()).await {
             tracing::error!("Output Queue Error: {e:?}, exiting");
             return;
         }
@@ -209,10 +211,10 @@ where
 }
 
 /// Input worker, getting frames from the `Client`
-async fn in_worker<W, Mode>(
+async fn in_worker<'a, W, Mode>(
     wire: W,
     host_ctx: Arc<HostContext<Mode>>,
-    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
+    subscriptions: Arc<Mutex<Subscriptions<'a,Mode>>>,
     stop: Stopper,
 ) where
     W: WireRx,
@@ -237,10 +239,10 @@ async fn in_worker<W, Mode>(
     guard.broadcast_list.clear();
 }
 
-async fn in_worker_inner<W, Mode>(
+async fn in_worker_inner<'a, W, Mode>(
     mut wire: W,
     host_ctx: Arc<HostContext<Mode>>,
-    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
+    subscriptions: Arc<Mutex<Subscriptions<'a, Mode>>>,
 ) where
     W: WireRx,
     W::Error: Debug,
@@ -274,10 +276,11 @@ async fn in_worker_inner<W, Mode>(
                 .find(|(k, _)| VarKey::Key8(*k) == key)
             {
                 handled = true;
-                let frame = RpcFrame::<Mode> {
+                let frame = RpcMessage::<Mode> {
                     header: hdr,
                     body: body.to_vec(),
                     _hm: PhantomData,
+                    _lifetime: PhantomData,
                 };
                 let res = m.send(frame);
 
@@ -299,10 +302,11 @@ async fn in_worker_inner<W, Mode>(
                 .find(|(k, _)| VarKey::Key8(*k) == key)
             {
                 handled = true;
-                let frame = RpcFrame::<Mode> {
+                let frame = RpcMessage::<Mode> {
                     header: hdr,
                     body: body.to_vec(),
                     _hm: PhantomData,
+                    _lifetime: PhantomData,
                 };
 
                 let res = m.try_send(frame);
@@ -352,10 +356,11 @@ async fn in_worker_inner<W, Mode>(
             continue;
         }
 
-        let frame = RpcFrame::<Mode> {
+        let frame = RpcMessage::<Mode> {
             header: hdr,
             body: body.to_vec(),
             _hm: PhantomData,
+            _lifetime: PhantomData,
         };
 
         match host_ctx.process_did_wake(frame) {

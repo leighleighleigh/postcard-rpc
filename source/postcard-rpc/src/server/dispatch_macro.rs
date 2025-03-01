@@ -144,8 +144,8 @@ macro_rules! define_dispatch {
                 hdr: &<Self::Mode as $crate::header::HeaderMode>::HeaderType,
                 body: &[u8],
             ) -> Result<(), <Self::Tx as $crate::server::WireTx>::Error> {
-                let key = hdr.key;
-                let Ok(keyb) = <$key_ty>::try_from(&key) else {
+                let key = <<Self::Mode as $crate::header::HeaderMode>::HeaderType as $crate::header::HeaderImplMeta>::key(hdr);
+                let Ok(keyb) = <$key_ty>::try_from(key) else {
                     let err = $crate::standard_icd::WireError::KeyTooSmall;
                     return tx.error(hdr, err).await;
                 };
@@ -164,15 +164,15 @@ macro_rules! define_dispatch {
                         tx.send_all_schemas(hdr, self.device_map).await
                     },
                     <$crate::standard_icd::RawFrameProxy as $crate::Endpoint>::$req_key_name => {
-                        // This type of frame gets deserialized by the sender 'from_proxied_bytes' method,
-                        // which attempts to deserialize the body into an inner RpcFrame<OtherMode>.
-                        // If that works, we can call self.handle on the inner frame ;) nice!
-                        let Ok(_frame) = tx.from_proxied_bytes(hdr, body) else {
-                            let err = $crate::standard_icd::WireError::DeserFailed;
-                            return tx.error(hdr, err).await;
-                        };
-                        // hmm somethign isnt quite working here. todo.
-                        // self.handle(tx, frame.header, &frame.body).await
+                        // // This type of frame gets deserialized by the sender 'from_proxied_bytes' method,
+                        // // which attempts to deserialize the body into an inner RpcMessage<OtherMode>.
+                        // // If that works, we can call self.handle on the inner frame ;) nice!
+                        // let Ok(_frame) = tx.from_proxied_bytes(hdr, body) else {
+                        //     let err = $crate::standard_icd::WireError::DeserFailed;
+                        //     return tx.error(hdr, err).await;
+                        // };
+                        // // hmm somethign isnt quite working here. todo.
+                        // // self.handle(tx, frame.header, &frame.body).await
                         Ok(())
                     },
                     // end

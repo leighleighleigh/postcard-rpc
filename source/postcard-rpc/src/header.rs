@@ -64,6 +64,116 @@ use crate::{Key, Key1, Key2, Key4};
 use core::marker::PhantomData;
 
 //////////////////////////////////////////////////////////////////////////////
+// FRAME
+//////////////////////////////////////////////////////////////////////////////
+/// 
+/// A single postcard-rpc frame
+#[derive(Clone)]
+pub struct RpcMessage<'a,Mode: HeaderMode> {
+    /// The wire header
+    pub header: Mode::HeaderType,
+    /// The serialized message payload
+    #[cfg(feature = "use-std")]
+    pub body: Vec<u8>,
+    #[cfg(not(feature = "use-std"))]
+    pub body: &'a [u8],
+    /// Phantom data to keep track of the mode
+    pub _hm: PhantomData<Mode>,
+    /// Holds the lifetime
+    pub _lifetime: PhantomData<&'a ()>,
+}
+
+impl<'a,Mode> RpcMessage<'a,Mode>
+where
+    Mode: HeaderMode,
+{
+    /// New from header and body
+    #[cfg(feature = "use-std")]
+    pub fn new(header: Mode::HeaderType) -> Self {
+        Self {
+            header,
+            body: Vec::new(),
+            _hm: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "use-std")]
+    pub fn with_body(&self, body: Vec<u8>) -> RpcMessage<'a,Mode> {
+        Self {
+            header: self.header,
+            body,
+            _hm: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    #[cfg(not(feature = "use-std"))]
+    pub fn new(header: Mode::HeaderType, body: &'a [u8]) -> Self {
+        Self {
+            header,
+            body,
+            _hm: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    #[cfg(not(feature = "use-std"))]
+    pub fn with_body(&self, body: &'a [u8]) -> RpcMessage<'a,Mode> {
+        Self {
+            header: self.header,
+            body,
+            _hm: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Serialize the `RpcMessage` into a Vec of bytes
+    #[cfg(feature = "use-std")]
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut out = self.header.write_to_vec();
+        out.extend_from_slice(&self.body);
+        out
+    }
+
+    #[cfg(feature = "use-std")]
+    pub fn from_vec(buf: &'a mut Vec<u8>) -> Option<Self> {
+        let slice: &'a mut [u8] = buf.as_mut_slice();
+        Mode::HeaderType::take_from_slice(slice).map(|(header, rest)| {
+            Self {
+                header,
+                body: rest.to_vec(),
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            }
+        })
+    }
+
+    /// Serialize the `RpcMessage` into a slice of bytes
+    pub fn to_slice(&self, buf: &mut [u8]) {
+        self.header.write_to_slice(buf).map(|(_header, rest)| {
+            rest.copy_from_slice(&self.body);
+        });
+    }
+
+    /// Deserialize an `RpcMessage` from a slice of bytes
+    pub fn from_slice(buf: &'a mut [u8]) -> Option<Self> {
+        Mode::HeaderType::take_from_slice(buf).map(|(header, rest)| {
+            Self {
+                header,
+                #[cfg(feature = "use-std")]
+                body: rest.to_vec(),
+                #[cfg(not(feature = "use-std"))]
+                body: rest,
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            }
+        })
+    }
+
+}
+
+//////////////////////////////////////////////////////////////////////////////
 // VARKEY
 //////////////////////////////////////////////////////////////////////////////
 
@@ -444,7 +554,7 @@ pub trait HeaderImplMeta: Clone + Copy + Send + core::fmt::Debug {
     fn with_seq_no(&self, seq_no: VarSeq) -> Self;
 }
 // PartialEq is required to use in the WaitMap
-pub trait HeaderImpl: PartialEq + HeaderImplMeta + Addressable {
+pub trait Header: PartialEq + HeaderImplMeta + Addressable {
     fn into_response(&self, endpoint_response_key: VarKey) -> Self {
         self.with_key(endpoint_response_key).swap_addresses()
     }
@@ -554,7 +664,7 @@ impl Addressable for VarHeader {
     }
 }
 
-impl HeaderImpl for VarHeader {
+impl Header for VarHeader {
     /// Encode the header to a Vec of bytes
     #[cfg(feature = "use-std")]
     fn write_to_vec(&self) -> Vec<u8> {
@@ -735,22 +845,22 @@ impl HeaderImpl for VarHeader {
     }
 }
 
-pub type WiredHeader = VarHeader;
+pub type UnicastHeader = VarHeader;
 
-impl PartialEq for WiredHeader {
+impl PartialEq for UnicastHeader {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key && self.seq_no == other.seq_no
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct WirelessHeader {
+pub struct BroadcastHeader {
     pub vh: VarHeader,
     pub src: MacAddress,
     pub dst: MacAddress,
 }
 
-impl Addressable for WirelessHeader {
+impl Addressable for BroadcastHeader {
     type AddressType = MacAddress;
 
     fn with_addresses(&self, src: Self::AddressType, dst: Self::AddressType) -> Self {
@@ -794,7 +904,7 @@ impl Addressable for WirelessHeader {
     }
 }
 
-impl HeaderImpl for WirelessHeader {
+impl Header for BroadcastHeader {
     #[cfg(feature = "use-std")]
     fn write_to_vec(&self) -> Vec<u8> {
         let mut vhvec = self.vh.write_to_vec();
@@ -822,11 +932,11 @@ impl HeaderImpl for WirelessHeader {
         if let Some((vh, rest)) = VarHeader::take_from_slice(buf) {
             // split for the src address, then the dst address
             let (src, rest) = rest.split_at(6);
-            let src : [u8; 6] = src.try_into().unwrap();
-            let src_addr : MacAddress = src.into();
+            let src: [u8; 6] = src.try_into().unwrap();
+            let src_addr: MacAddress = src.into();
             let (dst, rest) = rest.split_at(6);
-            let dst : [u8; 6] = dst.try_into().unwrap();
-            let dst_addr : MacAddress = dst.into();
+            let dst: [u8; 6] = dst.try_into().unwrap();
+            let dst_addr: MacAddress = dst.into();
 
             Some((
                 Self {
@@ -842,7 +952,7 @@ impl HeaderImpl for WirelessHeader {
     }
 }
 
-impl HeaderImplMeta for WirelessHeader {
+impl HeaderImplMeta for BroadcastHeader {
     fn new(key: VarKey, seq_no: VarSeq) -> Self {
         Self {
             vh: VarHeader::new(key, seq_no),
@@ -876,7 +986,7 @@ impl HeaderImplMeta for WirelessHeader {
     }
 }
 
-impl PartialEq for WirelessHeader {
+impl PartialEq for BroadcastHeader {
     fn eq(&self, other: &Self) -> bool {
         // this one is a bit conditional! as it handles the case where we sent a broadcast and
         // are expecting a reply - but we dont know where it will come from.
@@ -891,13 +1001,13 @@ impl PartialEq for WirelessHeader {
 /// A marker trait for initializing drivers in a specific mode.
 /// Inspired by https://github.com/esp-rs/esp-hal
 pub trait HeaderMode: Clone + 'static {
-    type HeaderType: HeaderImpl; // the HeaderType must be something that impliments HeaderImpl / VarFields
+    type HeaderType: Header; // the HeaderType must be something that impliments HeaderImpl / VarFields
 }
 #[derive(Debug, Copy, Clone)]
-pub struct Wired; // point-to-point, non-addressed communications channel. server+client
+pub struct Unicast; // point-to-point, non-addressed communications channel. server+client
 
 #[derive(Debug, Copy, Clone)]
-pub struct Wireless(PhantomData<fn() -> *const ()>);
+pub struct Broadcast(PhantomData<fn() -> *const ()>);
 // pub struct Wireless(PhantomData<fn(*const ()) -> *const ()>);
 // pub struct Wireless(PhantomData<fn(*const ())>);
 // pub struct Wireless(PhantomData<fn() -> *const ()>);
@@ -905,21 +1015,21 @@ pub struct Wireless(PhantomData<fn() -> *const ()>);
 // doing PhantomData<fn() -> *const ()> allows Wireless to be Send! :O
 // https://doc.rust-lang.org/nomicon/phantom-data.html#table-of-phantomdata-patterns
 
-impl HeaderMode for Wired {
-    type HeaderType = WiredHeader;
+impl HeaderMode for Unicast {
+    type HeaderType = UnicastHeader;
 }
-impl HeaderMode for Wireless {
-    type HeaderType = WirelessHeader;
+impl HeaderMode for Broadcast {
+    type HeaderType = BroadcastHeader;
 }
 
 // Requires adding 'trait-impl-incorrect-safety' to 'rust-analyzer.diagnostics.disabled'
-unsafe impl Send for Wired {}
-unsafe impl Send for Wireless {}
+unsafe impl Send for Unicast {}
+unsafe impl Send for Broadcast {}
 
 #[cfg(test)]
 mod test {
-    use super::HeaderImpl;
-    use super::{VarHeader, VarKey, VarSeq};
+    use super::{Addressable, BroadcastHeader, Header, HeaderImplMeta, HeaderMode};
+    use super::{VarHeader, VarKey, VarSeq, Broadcast, Unicast};
     use crate::{Key, Key1, Key2};
 
     #[test]
@@ -1025,4 +1135,44 @@ mod test {
         assert_ne!(VarSeq::Seq4(val32), VarSeq::Seq2(val32 as u16));
         assert_eq!(VarSeq::Seq4(val32), VarSeq::Seq4(val32));
     }
+
+    // Test serialization and deserialization of Unicast and Broadcast headers
+    fn build_header<M: HeaderMode>() -> M::HeaderType {
+        let k = VarKey::Key1(Key1(0x69));
+        let s = VarSeq::Seq2(0x1234);
+        M::HeaderType::new(k, s)
+    }
+
+    // Generic function for testing serde of headers
+    fn test_header_serde<H: Header>(header : H) -> H {
+        let header_bytes = header.write_to_vec();
+        let (deserialized_header, _) = H::take_from_slice(&header_bytes).unwrap();
+        assert_eq!(header, deserialized_header);
+        deserialized_header
+    }
+
+    #[test]
+    fn unicast_serde() {
+        let header = build_header::<Unicast>();
+        println!("{:?}", header);
+        test_header_serde(header);
+    }
+
+    #[test]
+    fn broadcast_serde() {
+        let header = build_header::<Broadcast>();
+        println!("{:?}", header);
+        test_header_serde(header);
+    }
+
+    #[test]
+    fn broadcast_serde_addresses() {
+        let mut header = build_header::<Broadcast>();
+        header = header.with_src(<BroadcastHeader as Addressable>::AddressType::localhost());
+        header = header.with_dst(<BroadcastHeader as Addressable>::AddressType::broadcast());
+        println!("{:?}", header);
+        let received = test_header_serde(header);
+        println!("{:?}", received);
+    }
+
 }

@@ -1,7 +1,7 @@
 //! Implementation using `embassy-usb` and bulk interfaces
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
+    header::{Header, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Unicast, UnicastHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -250,12 +250,12 @@ impl<M: RawMutex + 'static, D: Driver<'static> + 'static> Clone for EUsbWireTx<M
 }
 
 impl<M: RawMutex + 'static, D: Driver<'static> + 'static> HeaderMode for EUsbWireTx<M, D> {
-    type HeaderType = WiredHeader;
+    type HeaderType = UnicastHeader;
 }
 
 impl<M: RawMutex + 'static, D: Driver<'static> + 'static> WireTx for EUsbWireTx<M, D> {
     type Error = WireTxErrorKind;
-    type Mode = Wired;
+    type Mode = Unicast;
 
     async fn send<T: Serialize + ?Sized>(
         &self,
@@ -543,6 +543,7 @@ pub struct EUsbWireRx<D: Driver<'static>> {
 
 impl<D: Driver<'static>> WireRx for EUsbWireRx<D> {
     type Error = WireRxErrorKind;
+    type Mode = Unicast;
 
     async fn receive<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::Error> {
         let buflen = buf.len();
@@ -654,7 +655,7 @@ pub mod fake {
         topics,
     };
     use crate::{
-        header::{VarHeader, Wired},
+        header::{VarHeader, Unicast},
         Schema,
     };
     use embassy_usb_driver::{Bus, ControlPipe, EndpointIn, EndpointOut};
@@ -898,7 +899,7 @@ pub mod fake {
         app: SingleDispatcher;
         spawn_fn: spawn_fn;
         tx_impl: WireTxImpl<FakeMutex, FakeDriver>;
-        hd_mode: Wired;
+        hd_mode: Unicast;
         spawn_impl: WireSpawnImpl;
         context: TestContext;
 
@@ -957,7 +958,7 @@ pub mod fake {
         _context: TestSpawnContext,
         _header: VarHeader,
         _body: EReq,
-        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>, Wired>,
+        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>, Unicast>,
     ) {
         todo!()
     }

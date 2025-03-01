@@ -28,8 +28,8 @@ use util::Subscriptions;
 
 use crate::{
     header::{
-        Addressable, HeaderImpl, HeaderImplMeta, HeaderMode, VarKey, VarKeyKind, VarSeq,
-        VarSeqKind, Wired,
+        Addressable, Header, HeaderImplMeta, HeaderMode, RpcMessage, Unicast, VarKey, VarKeyKind,
+        VarSeq, VarSeqKind,
     },
     standard_icd::{GetAllSchemaDataTopic, GetAllSchemasEndpoint, OwnedSchemaData},
     Endpoint, Key, Topic, TopicDirection,
@@ -179,8 +179,8 @@ pub trait WireSpawn: 'static {
 /// 2. With cobs CDC-ACM transfers: [`HostClient::new_serial_cobs()`]
 pub struct HostClient<WireErr, Mode: HeaderMode> {
     ctx: Arc<HostContext<Mode>>,
-    out: mpsc::Sender<RpcFrame<Mode>>,
-    subscriptions: Arc<Mutex<Subscriptions<Mode>>>,
+    out: mpsc::Sender<RpcMessage<'static, Mode>>,
+    subscriptions: Arc<Mutex<Subscriptions<'static, Mode>>>,
     err_key: Key,
     stopper: Stopper,
     seq_kind: VarSeqKind,
@@ -257,11 +257,13 @@ where
 {
     /// Perform an endpoint request/response,but without handling the
     /// Ser/De automatically
+    /// The input data is owned with lifetime 'a
+    /// Return type is owned by lifetime 'b
     pub async fn send_resp_raw(
         &self,
-        rqst: RpcFrame<Mode>,
+        rqst: RpcMessage<'static, Mode>,
         resp_key: Key,
-    ) -> Result<RpcFrame<Mode>, HostErr<WireErr>> {
+    ) -> Result<RpcMessage<'static, Mode>, HostErr<WireErr>> {
         let cancel_fut = self.stopper.wait_stopped();
         let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
         rqst.header.key_shrink_to(kkind);
@@ -314,7 +316,7 @@ where
                 if hdr.key().kind() != kkind {
                     *self.ctx.kkind.write().unwrap() = hdr.key().kind();
                 }
-                Ok(RpcFrame::<Mode> { header: hdr, body: resp, _hm: PhantomData })
+                Ok(RpcMessage::new(hdr).with_body(resp))
             },
             e = err_resp => {
                 let (hdr, resp) = e?;
@@ -336,16 +338,14 @@ where
         T::Message: Serialize,
     {
         let smsg = postcard::to_stdvec(msg).expect("alloc should never fail");
-        let frame = RpcFrame::<Mode> {
-            header: Mode::HeaderType::new(VarKey::Key8(T::TOPIC_KEY), seq_no),
-            body: smsg,
-            _hm: PhantomData,
-        };
+        let frame =
+            RpcMessage::new(Mode::HeaderType::new(VarKey::Key8(T::TOPIC_KEY), seq_no))
+                .with_body(smsg);
         self.publish_raw(frame).await
     }
 
     /// Publish the given raw frame
-    pub async fn publish_raw(&self, frame: RpcFrame<Mode>) -> Result<(), IoClosed> {
+    pub async fn publish_raw(&self, frame: RpcMessage<'static, Mode>) -> Result<(), IoClosed> {
         let kkind: VarKeyKind = *self.ctx.kkind.read().unwrap();
         frame.header.key_shrink_to(kkind);
 
@@ -639,14 +639,11 @@ where
         let seq_no = self.ctx.seq.fetch_add(1, Ordering::Relaxed);
 
         let msg = postcard::to_stdvec(&t).expect("Allocations should not ever fail");
-        let frame = RpcFrame::<Mode> {
-            // NOTE: send_resp_raw automatically shrinks down key and sequence
-            // kinds to the appropriate amount
-            header: Mode::HeaderType::new(VarKey::Key8(E::REQ_KEY), VarSeq::Seq4(seq_no))
+        let frame = RpcMessage::new(
+            Mode::HeaderType::new(VarKey::Key8(E::REQ_KEY), VarSeq::Seq4(seq_no))
                 .with_dst(server_addr),
-            body: msg,
-            _hm: PhantomData,
-        };
+        )
+        .with_body(msg);
         let frame = self.send_resp_raw(frame, E::RESP_KEY).await?;
         let r = postcard::from_bytes::<E::Response>(&frame.body)?;
         Ok(r)
@@ -753,7 +750,7 @@ where
 }
 
 /// # Interface Methods
-impl<WireErr> HostClient<WireErr, Wired>
+impl<WireErr> HostClient<WireErr, Unicast>
 where
     WireErr: DeserializeOwned + Schema,
 {
@@ -769,40 +766,39 @@ where
         E::Request: Serialize + Schema,
         E::Response: DeserializeOwned + Schema,
     {
-        self.send_request_to::<E>(<Wired as HeaderMode>::HeaderType::broadcast(), t)
+        self.send_request_to::<E>(<Unicast as HeaderMode>::HeaderType::broadcast(), t)
             .await
     }
     /// Obtain a [`SchemaReport`] describing the connected device
     pub async fn get_schema_report(&self) -> Result<SchemaReport, SchemaError<WireErr>> {
-        self.get_schema_report_from(<Wired as HeaderMode>::HeaderType::broadcast())
-            .await
+        self.get_schema_report_from(<Unicast as HeaderMode>::HeaderType::broadcast()).await
     }
 }
 
 /// Like Subscription, but receives Raw frames that are not
 /// automatically deserialized
 pub struct RawSubscription<Mode: HeaderMode> {
-    rx: mpsc::Receiver<RpcFrame<Mode>>,
+    rx: mpsc::Receiver<RpcMessage<'static, Mode>>,
     _hm: PhantomData<Mode>,
 }
 
-impl RawSubscription<Wired> {
+impl RawSubscription<Unicast> {
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Option<RpcFrame<Wired>> {
+    pub async fn recv(&mut self) -> Option<RpcMessage<'static, Unicast>> {
         self.rx.recv().await
     }
 }
 
 /// A structure that represents a subscription to the given topic
 pub struct Subscription<M, Mode: HeaderMode> {
-    rx: mpsc::Receiver<RpcFrame<Mode>>,
+    rx: mpsc::Receiver<RpcMessage<'static, Mode>>,
     _pd: PhantomData<M>,
     _hm: PhantomData<Mode>,
 }
 
-impl<M> Subscription<M, Wired>
+impl<M> Subscription<M, Unicast>
 where
     M: DeserializeOwned,
 {
@@ -822,15 +818,15 @@ where
 /// Like MultiSubscription, but receives Raw frames that are not
 /// automatically deserialized
 pub struct RawMultiSubscription<Mode: HeaderMode> {
-    rx: broadcast::Receiver<RpcFrame<Mode>>,
+    rx: broadcast::Receiver<RpcMessage<'static, Mode>>,
     _hm: PhantomData<Mode>,
 }
 
-impl RawMultiSubscription<Wired> {
+impl RawMultiSubscription<Unicast> {
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Result<RpcFrame<Wired>, MultiSubRxError> {
+    pub async fn recv(&mut self) -> Result<RpcMessage<'static, Unicast>, MultiSubRxError> {
         match self.rx.recv().await {
             Ok(f) => Ok(f),
             Err(broadcast::error::RecvError::Closed) => Err(MultiSubRxError::IoClosed),
@@ -841,7 +837,7 @@ impl RawMultiSubscription<Wired> {
 
 /// A structure that represents a subscription to the given topic
 pub struct MultiSubscription<M, Mode: HeaderMode> {
-    rx: broadcast::Receiver<RpcFrame<Mode>>,
+    rx: broadcast::Receiver<RpcMessage<'static, Mode>>,
     _pd: PhantomData<M>,
     _hm: PhantomData<Mode>,
 }
@@ -899,34 +895,11 @@ impl<WireErr, Mode: HeaderMode> Clone for HostClient<WireErr, Mode> {
 pub struct WireContext<Mode: HeaderMode> {
     /// This is a stream of frames that should be placed on the
     /// wire towards the server.
-    pub outgoing: mpsc::Receiver<RpcFrame<Mode>>,
+    pub outgoing: mpsc::Receiver<RpcMessage<'static, Mode>>,
     /// This shared information contains the WaitMap used for replying to
     /// open requests.
     pub incoming: Arc<HostContext<Mode>>,
     _hm: PhantomData<Mode>,
-}
-
-/// A single postcard-rpc frame
-#[derive(Clone)]
-pub struct RpcFrame<Mode: HeaderMode> {
-    /// The wire header
-    pub header: Mode::HeaderType,
-    /// The serialized message payload
-    pub body: Vec<u8>,
-    /// Phantom data to keep track of the mode
-    pub _hm: PhantomData<Mode>,
-}
-
-impl<Mode> RpcFrame<Mode>
-where
-    Mode: HeaderMode,
-{
-    /// Serialize the `RpcFrame` into a Vec of bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = self.header.write_to_vec();
-        out.extend_from_slice(&self.body);
-        out
-    }
 }
 
 /// Shared context between [HostClient] and the I/O worker task
@@ -964,7 +937,7 @@ where
 {
     /// Like `HostContext::process` but tells you if we processed the message or
     /// nobody wanted it
-    pub fn process_did_wake(&self, frame: RpcFrame<Mode>) -> Result<bool, ProcessError> {
+    pub fn process_did_wake(&self, frame: RpcMessage<Mode>) -> Result<bool, ProcessError> {
         match self.map.wake(&frame.header, (frame.header, frame.body)) {
             WakeOutcome::Woke => Ok(true),
             WakeOutcome::NoMatch(_) => Ok(false),
@@ -975,7 +948,7 @@ where
     /// Process the message, returns Ok if the message was taken or dropped.
     ///
     /// Returns an Err if the map was closed.
-    pub fn process(&self, frame: RpcFrame<Mode>) -> Result<(), ProcessError> {
+    pub fn process(&self, frame: RpcMessage<Mode>) -> Result<(), ProcessError> {
         if let WakeOutcome::Closed(_) = self.map.wake(&frame.header, (frame.header, frame.body)) {
             Err(ProcessError::Closed)
         } else {

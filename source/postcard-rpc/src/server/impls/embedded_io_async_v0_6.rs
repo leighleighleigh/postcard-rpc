@@ -2,7 +2,7 @@
 use core::{fmt::Arguments, ops::DerefMut};
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
+    header::{Header, HeaderImplMeta, VarHeader, VarKey, VarKeyKind, VarSeq, Unicast, UnicastHeader},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -19,15 +19,6 @@ use serde::Serialize;
 /// A collection of types and aliases useful for importing the correct types
 pub mod dispatch_impl {
     pub use crate::server::impls::embassy_shared::embassy_spawn as spawn_fn;
-
-    // use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
-    // use embassy_usb_0_4::{
-    //     msos::{self, windows_version},
-    //     Builder, Config, UsbDevice,
-    // };
-    // use embassy_usb_driver::Driver;
-    // use static_cell::{ConstStaticCell, StaticCell};
-
     /// Type alias for `WireTx` impl
     pub type WireTxImpl<M, D> = super::EioWireTx<M, D>;
     /// Type alias for `WireRx` impl
@@ -71,14 +62,6 @@ where
     }
 }
 
-impl<R, Tx> HeaderMode for EioWireTx<R, Tx>
-where
-    R: RawMutex + 'static,
-    Tx: Write + 'static,
-{
-    type HeaderType = WiredHeader;
-}
-
 fn flava_flav(buf: &'_ mut [u8]) -> Result<Cobs<Slice<'_>>, WireTxErrorKind> {
     Cobs::try_new(Slice::new(buf)).map_err(|_| WireTxErrorKind::ConnectionClosed)
 }
@@ -116,11 +99,11 @@ where
     Tx: Write + 'static,
 {
     type Error = WireTxErrorKind;
-    type Mode = Wired;
+    type Mode = Unicast;
 
     async fn send<T: Serialize + ?Sized>(
         &self,
-        hdr: VarHeader,
+        hdr: UnicastHeader,
         msg: &T,
     ) -> Result<(), Self::Error> {
         let mut guard = self.t.lock().await;
@@ -180,10 +163,7 @@ where
         };
         let ctr = *log_seq;
         *log_seq = log_seq.wrapping_add(1);
-        let wh = VarHeader {
-            key,
-            seq_no: VarSeq::Seq2(ctr),
-        };
+        let wh = UnicastHeader::new(key,VarSeq::Seq2(ctr));
 
         header_to_flavor(&wh, &mut flavor)?;
         let used = body_to_flavor(s, flavor)?;
@@ -229,6 +209,7 @@ fn copy_backwards(buf: &mut [u8], start: usize) {
 
 impl<R: Read> WireRx for EioWireRx<R> {
     type Error = WireRxErrorKind;
+    type Mode = Unicast;
 
     async fn receive<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::Error> {
         if self.offset != 0 {

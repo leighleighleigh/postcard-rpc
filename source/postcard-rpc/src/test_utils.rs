@@ -2,10 +2,10 @@
 
 use core::{fmt::Display, future::Future};
 
-use crate::header::{HeaderImpl, HeaderMode, VarHeader, VarKey, VarSeq, Wired, WiredHeader};
+use crate::header::{Header, HeaderMode, VarHeader, VarKey, VarSeq, Unicast, UnicastHeader, RpcMessage};
 use crate::host_client::util::Stopper;
 use crate::{
-    host_client::{RpcFrame, WireRx, WireSpawn, WireTx},
+    host_client::{WireRx, WireSpawn, WireTx},
     Endpoint, Topic,
 };
 use serde::Serialize;
@@ -38,17 +38,18 @@ pub struct LocalFakeServer<Mode: HeaderMode> {
     _hm: PhantomData<Mode>,
 }
 
-impl LocalFakeServer<Wired> {
+impl LocalFakeServer<Unicast> {
     /// receive a frame
-    pub async fn recv_from_client(&mut self) -> Result<RpcFrame<Wired>, LocalError> {
+    pub async fn recv_from_client(&mut self) -> Result<RpcMessage<Unicast>, LocalError> {
         let msg = self.from_client.recv().await.ok_or(LocalError::TxClosed)?;
         let Some((hdr, body)) = VarHeader::take_from_slice(&msg) else {
             return Err(LocalError::BadFrame);
         };
-        Ok(RpcFrame::<Wired> {
+        Ok(RpcMessage::<Unicast> {
             header: hdr,
             body: body.to_vec(),
             _hm: PhantomData,
+            _lifetime: PhantomData,
         })
     }
 
@@ -61,16 +62,17 @@ impl LocalFakeServer<Wired> {
     where
         E::Response: Serialize,
     {
-        let frame = RpcFrame::<Wired> {
-            header: WiredHeader {
+        let frame = RpcMessage::<Unicast> {
+            header: UnicastHeader {
                 key: VarKey::Key8(E::RESP_KEY),
                 seq_no: VarSeq::Seq4(seq_no),
             },
             body: postcard::to_stdvec(data).unwrap(),
             _hm: PhantomData,
+            _lifetime: PhantomData,
         };
         self.to_client
-            .send(frame.to_bytes())
+            .send(frame.to_vec())
             .await
             .map_err(|_| LocalError::RxClosed)
     }
@@ -84,16 +86,17 @@ impl LocalFakeServer<Wired> {
     where
         T::Message: Serialize,
     {
-        let frame = RpcFrame::<Wired> {
-            header: WiredHeader {
+        let frame = RpcMessage::<Unicast> {
+            header: UnicastHeader {
                 key: VarKey::Key8(T::TOPIC_KEY),
                 seq_no: VarSeq::Seq4(seq_no),
             },
             body: postcard::to_stdvec(data).unwrap(),
             _hm: PhantomData,
+            _lifetime: PhantomData,
         };
         self.to_client
-            .send(frame.to_bytes())
+            .send(frame.to_vec())
             .await
             .map_err(|_| LocalError::RxClosed)
     }

@@ -10,7 +10,7 @@ use postcard_schema::Schema;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarSeqKind, Wired},
+    header::{Header, HeaderMode, VarSeqKind, Unicast},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 
@@ -34,7 +34,7 @@ pub(crate) const MAX_STALL_RETRIES: usize = 10;
 /// USB bulk transfer encoding.
 ///
 /// **Requires feature**: `raw-nusb`
-impl<WireErr> HostClient<WireErr, Wired>
+impl<WireErr> HostClient<WireErr, Unicast>
 where
     WireErr: DeserializeOwned + Schema,
 {
@@ -60,7 +60,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::{VarSeqKind,Wired};
+    /// use postcard_rpc::header::{VarSeqKind,Unicast};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -71,7 +71,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error,Wired>::try_new_raw_nusb(
+    /// let client = HostClient::<Error,Unicast>::try_new_raw_nusb(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // the URI/path for `Error` messages
@@ -170,7 +170,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::{VarSeqKind,Wired};
+    /// use postcard_rpc::header::{VarSeqKind,Unicast};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -181,7 +181,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error,Wired>::try_new_raw_nusb_with_interface(
+    /// let client = HostClient::<Error,Unicast>::try_new_raw_nusb_with_interface(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // Find the "Vendor Specific" interface
@@ -269,7 +269,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::{VarSeqKind,Wired};
+    /// use postcard_rpc::header::{VarSeqKind,Unicast};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -280,7 +280,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error,Wired>::new_raw_nusb(
+    /// let client = HostClient::<Error,Unicast>::new_raw_nusb(
     ///     // Find the first device with the serial 12345678
     ///     |d| d.serial_number() == Some("12345678"),
     ///     // the URI/path for `Error` messages

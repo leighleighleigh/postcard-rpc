@@ -1,14 +1,12 @@
 //! Implementation that uses channels for local testing
 
 use core::{
-    convert::Infallible,
-    future::{pending, Future},
-    sync::atomic::{AtomicU32, Ordering},
+    convert::Infallible, future::{pending, Future}, marker::PhantomData, sync::atomic::{AtomicU32, Ordering}
 };
 use std::sync::Arc;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader},
+    header::{Header, HeaderMode, HeaderImplMeta, Addressable, VarKey, VarKeyKind, VarSeq, Unicast},
     host_client::util::Stopper,
     server::{
         AsWireRxErrorKind, AsWireTxErrorKind, WireRx, WireRxErrorKind, WireSpawn, WireTx,
@@ -28,18 +26,18 @@ use tokio::{select, sync::mpsc};
 pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
-        header::{VarKeyKind, Wired},
+        header::{VarKeyKind, Unicast, Broadcast, HeaderMode},
         server::{Dispatch, Server},
     };
 
     pub use super::tokio_spawn as spawn_fn;
 
     /// The settings necessary for creating a new channel server
-    pub struct Settings {
+    pub struct Settings<M: HeaderMode> {
         /// The frame sender
-        pub tx: WireTxImpl,
+        pub tx: WireTxImpl<M>,
         /// The frame receiver
-        pub rx: WireRxImpl,
+        pub rx: WireRxImpl<M>,
         /// The size of the receive buffer
         pub buf: usize,
         /// The sender key size to use
@@ -47,21 +45,22 @@ pub mod dispatch_impl {
     }
 
     /// Type alias for `WireTx` impl
-    pub type WireTxImpl = super::ChannelWireTx;
+    pub type WireTxImpl<M> = super::ChannelWireTx<M>;
     /// Type alias for `WireRx` impl
-    pub type WireRxImpl = super::ChannelWireRx;
+    pub type WireRxImpl<M> = super::ChannelWireRx<M>;
     /// Type alias for `WireSpawn` impl
     pub type WireSpawnImpl = super::ChannelWireSpawn;
     /// Type alias for the receive buffer
     pub type WireRxBuf = Box<[u8]>;
 
     /// Create a new server using the [`Settings`] and [`Dispatch`] implementation
-    pub fn new_server<D>(
+    pub fn new_server<D,M>(
         dispatch: D,
-        settings: Settings,
-    ) -> crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D, Wired>
+        settings: Settings<M>,
+    ) -> crate::server::Server<WireTxImpl<M>, WireRxImpl<M>, WireRxBuf, D, M>
     where
-        D: Dispatch<Tx = WireTxImpl, Mode = Wired>,
+        D: Dispatch<Tx = WireTxImpl<M>, Mode = M>,
+        M: HeaderMode,
     {
         let buf = vec![0; settings.buf];
         Server::new(
@@ -76,15 +75,16 @@ pub mod dispatch_impl {
     /// Create a new server using the [`Settings`] and [`Dispatch`] implementation
     ///
     /// Also returns a [`Stopper`] that can be used to halt the server's operation
-    pub fn new_server_stoppable<D>(
+    pub fn new_server_stoppable<D,M>(
         dispatch: D,
-        mut settings: Settings,
+        mut settings: Settings<M>,
     ) -> (
-        crate::server::Server<WireTxImpl, WireRxImpl, WireRxBuf, D, Wired>,
+        crate::server::Server<WireTxImpl<M>, WireRxImpl<M>, WireRxBuf, D, M>,
         Stopper,
     )
     where
-        D: Dispatch<Tx = WireTxImpl, Mode = Wired>,
+        D: Dispatch<Tx = WireTxImpl<M>, Mode = M>,
+        M: HeaderMode,
     {
         let stopper = Stopper::new();
         settings.tx.set_stopper(stopper.clone());
@@ -107,19 +107,21 @@ pub mod dispatch_impl {
 
 /// A [`WireTx`] impl using tokio mpsc channels
 #[derive(Clone)]
-pub struct ChannelWireTx {
+pub struct ChannelWireTx<M> where M: HeaderMode {
     tx: mpsc::Sender<Vec<u8>>,
     log_ctr: Arc<AtomicU32>,
     stopper: Option<Stopper>,
+    _hm: PhantomData<M>,
 }
 
-impl ChannelWireTx {
+impl<M: HeaderMode> ChannelWireTx<M> {
     /// Create a new [`ChannelWireTx`]
     pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
         Self {
             tx,
             log_ctr: Arc::new(AtomicU32::new(0)),
             stopper: None,
+            _hm: PhantomData,
         }
     }
 
@@ -150,21 +152,20 @@ impl ChannelWireTx {
     }
 }
 
-// this will be a wired channel
-impl HeaderMode for ChannelWireTx {
-    type HeaderType = WiredHeader;
-}
-
 // works around a silly bug: https://github.com/rust-lang/rust/issues/86935
 type Type<T> = T;
 
-impl WireTx for ChannelWireTx {
+impl<M> WireTx for ChannelWireTx<M>
+where
+    M: HeaderMode,
+    M::HeaderType: Header,
+{
     type Error = ChannelWireTxError;
-    type Mode = Wired;
+    type Mode = M;
 
     async fn send<T: serde::Serialize + ?Sized>(
         &self,
-        hdr: <Self::Mode as HeaderMode>::HeaderType,
+        hdr: M::HeaderType,
         msg: &T,
     ) -> Result<(), Self::Error> {
         let mut hdr_ser = hdr.write_to_vec();
@@ -186,10 +187,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType> {
-            key,
-            seq_no: VarSeq::Seq4(ctr),
-        };
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key,VarSeq::Seq4(ctr));
         let msg = s.to_string();
 
         self.send::<<LoggingTopic as Topic>::Message>(wh, &msg)
@@ -208,10 +206,7 @@ impl WireTx for ChannelWireTx {
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType> {
-            key,
-            seq_no: VarSeq::Seq4(ctr),
-        };
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key,VarSeq::Seq4(ctr));
         let mut buf = wh.write_to_vec();
         let msg = format!("{a}");
         let msg = postcard::to_stdvec(&msg).unwrap();
@@ -240,15 +235,20 @@ impl AsWireTxErrorKind for ChannelWireTxError {
 //////////////////////////////////////////////////////////////////////////////
 
 /// A [`WireRx`] impl using tokio mpsc channels
-pub struct ChannelWireRx {
+pub struct ChannelWireRx<M: HeaderMode> {
     rx: mpsc::Receiver<Vec<u8>>,
     stopper: Option<Stopper>,
+    _hm: PhantomData<M>,
 }
 
-impl ChannelWireRx {
+impl<M> ChannelWireRx<M>
+where
+    M: HeaderMode,
+    M::HeaderType: Header,
+{
     /// Create a new [`ChannelWireRx`]
     pub fn new(rx: mpsc::Receiver<Vec<u8>>) -> Self {
-        Self { rx, stopper: None }
+        Self { rx, stopper: None, _hm: PhantomData }
     }
 
     /// Add a stopper to listen for "close" methods
@@ -257,12 +257,17 @@ impl ChannelWireRx {
     }
 }
 
-impl WireRx for ChannelWireRx {
+impl<M> WireRx for ChannelWireRx<M>
+where 
+    M: HeaderMode,
+    M::HeaderType: Header,
+{
     type Error = ChannelWireRxError;
+    type Mode = M;
 
     async fn receive<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::Error> {
         // todo: some kind of receive_owned?
-        let ChannelWireRx { rx, stopper } = self;
+        let ChannelWireRx { rx, stopper , _hm: PhantomData } = self;
         let stop_fut = async {
             if let Some(s) = stopper.as_ref() {
                 s.wait_stopped().await;

@@ -33,7 +33,10 @@ use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{HeaderImpl, HeaderMode, VarKey, VarKeyKind, VarSeq, Wired, WiredHeader, Wireless, WirelessHeader}, host_client::RpcFrame, standard_icd, DeviceMap, Key, TopicDirection
+    header::{
+        Header, HeaderMode, VarKey, VarKeyKind, VarSeq,
+        RpcMessage, 
+    }, DeviceMap, Key, TopicDirection
 };
 
 use core::marker::PhantomData;
@@ -115,6 +118,27 @@ pub trait WireRx {
     /// For simple cases, you can use [`WireRxErrorKind`] directly. You can also
     /// use your own custom type that implements [`AsWireRxErrorKind`].
     type Error: AsWireRxErrorKind;
+    /// The type of header used by this connection
+    type Mode: HeaderMode;
+
+    /// Send a single frame to the client, returning when send is complete.
+    async fn receive_frame<'a>(
+        &mut self,
+        buf: &'a mut [u8],
+    ) -> Result<RpcMessage<'a,Self::Mode>, WireRxErrorKind> {
+        // Returns not just a byte buffer, but a Header and Body RpcMessage.
+        let frame = self.receive(buf).await.map_err(|e| e.as_kind())?;
+
+        if let Some((hdr, body)) = <Self::Mode as HeaderMode>::HeaderType::take_from_slice(frame) {
+            #[cfg(feature = "use-std")]
+            return Ok(RpcMessage::<'a,Self::Mode> { header: hdr, body: body.to_vec(), _hm: PhantomData, _lifetime: PhantomData });
+            #[cfg(not(feature = "use-std"))]
+            return Ok(RpcMessage::<'a,Self::Mode> { header: hdr, body, _hm: PhantomData, _lifetime: PhantomData });
+        } else {
+            // This is basically an error - we can't deserialize the header
+            return Err(WireRxErrorKind::DeserFailed);
+        };
+    }
 
     /// Receive a single frame
     ///
@@ -134,6 +158,8 @@ pub enum WireRxErrorKind {
     ReceivedMessageTooLarge,
     /// Other message kinds
     Other,
+    /// Frame deserialization failed
+    DeserFailed,
 }
 
 /// A conversion trait to convert a user error into a base Kind type
@@ -378,57 +404,6 @@ where
     }
 }
 
-///
-/// SENDER PROXY IMPLS
-///
-
-impl<Tx: WireTx> Sender<Tx, Wired>
-where
-    Tx: WireTx<Mode = Wired>,
-{
-    /// Turns some opaque bytes, which we assume are an RpcFrame<Wireless> (the opposite mode),
-    /// and attempts to deserialize it into a Wireless frame!
-    pub fn from_proxied_bytes(
-        &self,
-        _req_header: &WiredHeader,
-        body: &[u8],
-    ) -> Result<RpcFrame<Wireless>, standard_icd::WireError> {
-        match WirelessHeader::take_from_slice(&body) {
-            Some((h, b)) => {
-                Ok(RpcFrame::<Wireless>{
-                    header: h,
-                    body: b.to_vec(), 
-                    _hm: PhantomData,
-                })
-            }
-            None => return Err(standard_icd::WireError::DeserFailed),
-        }
-    }
-}
-
-impl<Tx: WireTx> Sender<Tx, Wireless>
-where
-    Tx: WireTx<Mode = Wireless>,
-{
-    /// Turns some opaque bytes, which we assume are an RpcFrame<Wireless> (the opposite mode),
-    /// and attempts to deserialize it into a Wireless frame!
-    pub fn from_proxied_bytes(
-        &self,
-        _req_header: &WirelessHeader,
-        body: &[u8],
-    ) -> Result<RpcFrame<Wired>, standard_icd::WireError> {
-        match WiredHeader::take_from_slice(&body) {
-            Some((h, b)) => {
-                Ok(RpcFrame::<Wired>{
-                    header: h,
-                    body: b.to_vec(), 
-                    _hm: PhantomData,
-                })
-            }
-            None => return Err(standard_icd::WireError::DeserFailed),
-        }
-    }
-}
 
 //////////////////////////////////////////////////////////////////////////////
 // SERVER
@@ -517,6 +492,7 @@ where
                         WireRxErrorKind::ConnectionClosed => return ServerError::RxFatal(e),
                         WireRxErrorKind::ReceivedMessageTooLarge => continue,
                         WireRxErrorKind::Other => continue,
+                        WireRxErrorKind::DeserFailed => continue,
                     }
                 }
             };
@@ -541,7 +517,7 @@ where
 impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx + Clone,
-    Rx: WireRx + Clone,
+    Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
     Mode: HeaderMode,
@@ -549,11 +525,6 @@ where
     /// Get a copy of the [`Sender`] to pass to tasks that need it
     pub fn sender(&self) -> Sender<Tx, Mode> {
         self.tx.clone()
-    }
-    /// Gets a copy of the ['Rx'] channel to provide side-channel messages
-    /// to the server
-    pub fn receiver(&self) -> Rx {
-        self.rx.clone()
     }
 }
 

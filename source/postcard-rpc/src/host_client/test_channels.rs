@@ -17,7 +17,7 @@ pub fn new_from_channels<Mode>(
 where
     Mode: HeaderMode + Send,
 {
-    HostClient::<WireError, Mode>::new_with_wire(
+    HostClient::new_with_wire(
         ChannelTx { tx },
         ChannelRx { rx },
         TokSpawn,

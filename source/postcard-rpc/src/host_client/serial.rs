@@ -8,7 +8,7 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 use crate::{
     accumulator::raw::{CobsAccumulator, FeedResult},
-    header::{HeaderImpl, HeaderMode, VarSeqKind, Wired},
+    header::{VarSeqKind, Unicast},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 
@@ -17,7 +17,7 @@ use crate::{
 /// These methods are used to create a new [HostClient] instance for use with tokio serial and cobs encoding.
 ///
 /// **Requires feature**: `cobs-serial`
-impl<WireErr> HostClient<WireErr, Wired>
+impl<WireErr> HostClient<WireErr, Unicast>
 where
     WireErr: DeserializeOwned + Schema,
 {
@@ -32,7 +32,7 @@ where
     ///
     /// ```rust,no_run
     /// use postcard_rpc::host_client::HostClient;
-    /// use postcard_rpc::header::{VarSeqKind,Wired};
+    /// use postcard_rpc::header::{VarSeqKind,Unicast};
     /// use serde::{Serialize, Deserialize};
     /// use postcard_schema::Schema;
     ///
@@ -43,7 +43,7 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error,Wired>::new_serial_cobs(
+    /// let client = HostClient::<Error,Unicast>::new_serial_cobs(
     ///     // the serial port path
     ///     "/dev/ttyACM0",
     ///     // the URI/path for `Error` messages
@@ -70,7 +70,7 @@ where
 
         let (rx, tx) = tokio::io::split(port);
 
-        Ok(HostClient::<WireErr, Wired>::new_with_wire(
+        Ok(HostClient::<WireErr, Unicast>::new_with_wire(
             SerialWireTx { tx },
             SerialWireRx {
                 rx,
