@@ -8,7 +8,7 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 use crate::{
     accumulator::raw::{CobsAccumulator, FeedResult},
-    header::{VarSeqKind, Unicast},
+    header::{Unicast, VarSeqKind},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 

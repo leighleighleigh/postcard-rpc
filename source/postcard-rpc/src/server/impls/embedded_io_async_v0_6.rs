@@ -2,7 +2,9 @@
 use core::{fmt::Arguments, ops::DerefMut};
 
 use crate::{
-    header::{Header, HeaderImplMeta, VarHeader, VarKey, VarKeyKind, VarSeq, Unicast, UnicastHeader},
+    header::{
+        Header, HeaderImplMeta, Unicast, UnicastHeader, VarHeader, VarKey, VarKeyKind, VarSeq,
+    },
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -163,7 +165,7 @@ where
         };
         let ctr = *log_seq;
         *log_seq = log_seq.wrapping_add(1);
-        let wh = UnicastHeader::new(key,VarSeq::Seq2(ctr));
+        let wh = UnicastHeader::new(key, VarSeq::Seq2(ctr));
 
         header_to_flavor(&wh, &mut flavor)?;
         let used = body_to_flavor(s, flavor)?;

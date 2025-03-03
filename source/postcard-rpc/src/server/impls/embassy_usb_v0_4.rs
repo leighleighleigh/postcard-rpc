@@ -1,7 +1,7 @@
 //! Implementation using `embassy-usb` and bulk interfaces
 
 use crate::{
-    header::{Header, HeaderMode, VarHeader, VarKey, VarKeyKind, VarSeq, Unicast, UnicastHeader},
+    header::{Header, HeaderMode, Unicast, UnicastHeader, VarHeader, VarKey, VarKeyKind, VarSeq},
     server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
@@ -655,7 +655,7 @@ pub mod fake {
         topics,
     };
     use crate::{
-        header::{VarHeader, Unicast},
+        header::{Unicast, VarHeader},
         Schema,
     };
     use embassy_usb_driver::{Bus, ControlPipe, EndpointIn, EndpointOut};

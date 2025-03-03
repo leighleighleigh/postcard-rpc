@@ -66,10 +66,10 @@ use core::marker::PhantomData;
 //////////////////////////////////////////////////////////////////////////////
 // FRAME
 //////////////////////////////////////////////////////////////////////////////
-/// 
+///
 /// A single postcard-rpc frame
 #[derive(Clone)]
-pub struct RpcMessage<'a,Mode: HeaderMode> {
+pub struct RpcMessage<'a, Mode: HeaderMode + Clone> {
     /// The wire header
     pub header: Mode::HeaderType,
     /// The serialized message payload
@@ -83,7 +83,7 @@ pub struct RpcMessage<'a,Mode: HeaderMode> {
     pub _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a,Mode> RpcMessage<'a,Mode>
+impl<'a, Mode> RpcMessage<'a, Mode>
 where
     Mode: HeaderMode,
 {
@@ -99,7 +99,7 @@ where
     }
 
     #[cfg(feature = "use-std")]
-    pub fn with_body(&self, body: Vec<u8>) -> RpcMessage<'a,Mode> {
+    pub fn with_body(&self, body: Vec<u8>) -> RpcMessage<'a, Mode> {
         Self {
             header: self.header,
             body,
@@ -119,7 +119,7 @@ where
     }
 
     #[cfg(not(feature = "use-std"))]
-    pub fn with_body(&self, body: &'a [u8]) -> RpcMessage<'a,Mode> {
+    pub fn with_body(&self, body: &'a [u8]) -> RpcMessage<'a, Mode> {
         Self {
             header: self.header,
             body,
@@ -139,13 +139,11 @@ where
     #[cfg(feature = "use-std")]
     pub fn from_vec(buf: &'a mut Vec<u8>) -> Option<Self> {
         let slice: &'a mut [u8] = buf.as_mut_slice();
-        Mode::HeaderType::take_from_slice(slice).map(|(header, rest)| {
-            Self {
-                header,
-                body: rest.to_vec(),
-                _hm: PhantomData,
-                _lifetime: PhantomData,
-            }
+        Mode::HeaderType::take_from_slice(slice).map(|(header, rest)| Self {
+            header,
+            body: rest.to_vec(),
+            _hm: PhantomData,
+            _lifetime: PhantomData,
         })
     }
 
@@ -158,19 +156,16 @@ where
 
     /// Deserialize an `RpcMessage` from a slice of bytes
     pub fn from_slice(buf: &'a mut [u8]) -> Option<Self> {
-        Mode::HeaderType::take_from_slice(buf).map(|(header, rest)| {
-            Self {
-                header,
-                #[cfg(feature = "use-std")]
-                body: rest.to_vec(),
-                #[cfg(not(feature = "use-std"))]
-                body: rest,
-                _hm: PhantomData,
-                _lifetime: PhantomData,
-            }
+        Mode::HeaderType::take_from_slice(buf).map(|(header, rest)| Self {
+            header,
+            #[cfg(feature = "use-std")]
+            body: rest.to_vec(),
+            #[cfg(not(feature = "use-std"))]
+            body: rest,
+            _hm: PhantomData,
+            _lifetime: PhantomData,
         })
     }
-
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1029,7 +1024,7 @@ unsafe impl Send for Broadcast {}
 #[cfg(test)]
 mod test {
     use super::{Addressable, BroadcastHeader, Header, HeaderImplMeta, HeaderMode};
-    use super::{VarHeader, VarKey, VarSeq, Broadcast, Unicast};
+    use super::{Broadcast, Unicast, VarHeader, VarKey, VarSeq};
     use crate::{Key, Key1, Key2};
 
     #[test]
@@ -1144,7 +1139,7 @@ mod test {
     }
 
     // Generic function for testing serde of headers
-    fn test_header_serde<H: Header>(header : H) -> H {
+    fn test_header_serde<H: Header>(header: H) -> H {
         let header_bytes = header.write_to_vec();
         let (deserialized_header, _) = H::take_from_slice(&header_bytes).unwrap();
         assert_eq!(header, deserialized_header);
@@ -1174,5 +1169,4 @@ mod test {
         let received = test_header_serde(header);
         println!("{:?}", received);
     }
-
 }

@@ -338,9 +338,8 @@ where
         T::Message: Serialize,
     {
         let smsg = postcard::to_stdvec(msg).expect("alloc should never fail");
-        let frame =
-            RpcMessage::new(Mode::HeaderType::new(VarKey::Key8(T::TOPIC_KEY), seq_no))
-                .with_body(smsg);
+        let frame = RpcMessage::new(Mode::HeaderType::new(VarKey::Key8(T::TOPIC_KEY), seq_no))
+            .with_body(smsg);
         self.publish_raw(frame).await
     }
 
@@ -771,7 +770,8 @@ where
     }
     /// Obtain a [`SchemaReport`] describing the connected device
     pub async fn get_schema_report(&self) -> Result<SchemaReport, SchemaError<WireErr>> {
-        self.get_schema_report_from(<Unicast as HeaderMode>::HeaderType::broadcast()).await
+        self.get_schema_report_from(<Unicast as HeaderMode>::HeaderType::broadcast())
+            .await
     }
 }
 
@@ -782,11 +782,14 @@ pub struct RawSubscription<Mode: HeaderMode> {
     _hm: PhantomData<Mode>,
 }
 
-impl RawSubscription<Unicast> {
+impl<Mode> RawSubscription<Mode>
+where
+    Mode: HeaderMode,
+{
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Option<RpcMessage<'static, Unicast>> {
+    pub async fn recv(&mut self) -> Option<RpcMessage<'static, Mode>> {
         self.rx.recv().await
     }
 }
@@ -798,9 +801,10 @@ pub struct Subscription<M, Mode: HeaderMode> {
     _hm: PhantomData<Mode>,
 }
 
-impl<M> Subscription<M, Unicast>
+impl<M, Mode> Subscription<M, Mode>
 where
     M: DeserializeOwned,
+    Mode: HeaderMode,
 {
     /// Await a message for the given subscription.
     ///
@@ -822,11 +826,14 @@ pub struct RawMultiSubscription<Mode: HeaderMode> {
     _hm: PhantomData<Mode>,
 }
 
-impl RawMultiSubscription<Unicast> {
+impl<Mode> RawMultiSubscription<Mode>
+where
+    Mode: HeaderMode,
+{
     /// Await a message for the given subscription.
     ///
     /// Returns [None]` if the subscription was closed
-    pub async fn recv(&mut self) -> Result<RpcMessage<'static, Unicast>, MultiSubRxError> {
+    pub async fn recv(&mut self) -> Result<RpcMessage<'static, Mode>, MultiSubRxError> {
         match self.rx.recv().await {
             Ok(f) => Ok(f),
             Err(broadcast::error::RecvError::Closed) => Err(MultiSubRxError::IoClosed),
@@ -903,9 +910,9 @@ pub struct WireContext<Mode: HeaderMode> {
 }
 
 /// Shared context between [HostClient] and the I/O worker task
-pub struct HostContext<H: HeaderMode> {
+pub struct HostContext<Mode: HeaderMode> {
     kkind: RwLock<VarKeyKind>,
-    map: WaitMap<H::HeaderType, (H::HeaderType, Vec<u8>)>,
+    map: WaitMap<Mode::HeaderType, (Mode::HeaderType, Vec<u8>)>,
     seq: AtomicU32,
     subscription_timeout: Duration,
 }

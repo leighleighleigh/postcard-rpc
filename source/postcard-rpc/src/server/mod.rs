@@ -33,10 +33,8 @@ use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{
-        Header, HeaderMode, VarKey, VarKeyKind, VarSeq,
-        RpcMessage, 
-    }, DeviceMap, Key, TopicDirection
+    header::{Header, HeaderMode, RpcMessage, VarKey, VarKeyKind, VarSeq},
+    DeviceMap, Key, TopicDirection,
 };
 
 use core::marker::PhantomData;
@@ -125,15 +123,25 @@ pub trait WireRx {
     async fn receive_frame<'a>(
         &mut self,
         buf: &'a mut [u8],
-    ) -> Result<RpcMessage<'a,Self::Mode>, WireRxErrorKind> {
+    ) -> Result<RpcMessage<'a, Self::Mode>, WireRxErrorKind> {
         // Returns not just a byte buffer, but a Header and Body RpcMessage.
         let frame = self.receive(buf).await.map_err(|e| e.as_kind())?;
 
         if let Some((hdr, body)) = <Self::Mode as HeaderMode>::HeaderType::take_from_slice(frame) {
             #[cfg(feature = "use-std")]
-            return Ok(RpcMessage::<'a,Self::Mode> { header: hdr, body: body.to_vec(), _hm: PhantomData, _lifetime: PhantomData });
+            return Ok(RpcMessage::<'a, Self::Mode> {
+                header: hdr,
+                body: body.to_vec(),
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            });
             #[cfg(not(feature = "use-std"))]
-            return Ok(RpcMessage::<'a,Self::Mode> { header: hdr, body, _hm: PhantomData, _lifetime: PhantomData });
+            return Ok(RpcMessage::<'a, Self::Mode> {
+                header: hdr,
+                body,
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            });
         } else {
             // This is basically an error - we can't deserialize the header
             return Err(WireRxErrorKind::DeserFailed);
@@ -403,7 +411,6 @@ where
         Ok(())
     }
 }
-
 
 //////////////////////////////////////////////////////////////////////////////
 // SERVER

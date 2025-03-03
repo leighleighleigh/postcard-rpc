@@ -1,12 +1,17 @@
 //! Implementation that uses channels for local testing
 
 use core::{
-    convert::Infallible, future::{pending, Future}, marker::PhantomData, sync::atomic::{AtomicU32, Ordering}
+    convert::Infallible,
+    future::{pending, Future},
+    marker::PhantomData,
+    sync::atomic::{AtomicU32, Ordering},
 };
 use std::sync::Arc;
 
 use crate::{
-    header::{Header, HeaderMode, HeaderImplMeta, Addressable, VarKey, VarKeyKind, VarSeq, Unicast},
+    header::{
+        Header, HeaderMode, HeaderImplMeta, VarKey, VarKeyKind, VarSeq,
+    },
     host_client::util::Stopper,
     server::{
         AsWireRxErrorKind, AsWireTxErrorKind, WireRx, WireRxErrorKind, WireSpawn, WireTx,
@@ -26,7 +31,7 @@ use tokio::{select, sync::mpsc};
 pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
-        header::{VarKeyKind, Unicast, Broadcast, HeaderMode},
+        header::{HeaderMode, VarKeyKind},
         server::{Dispatch, Server},
     };
 
@@ -54,7 +59,7 @@ pub mod dispatch_impl {
     pub type WireRxBuf = Box<[u8]>;
 
     /// Create a new server using the [`Settings`] and [`Dispatch`] implementation
-    pub fn new_server<D,M>(
+    pub fn new_server<D, M>(
         dispatch: D,
         settings: Settings<M>,
     ) -> crate::server::Server<WireTxImpl<M>, WireRxImpl<M>, WireRxBuf, D, M>
@@ -75,7 +80,7 @@ pub mod dispatch_impl {
     /// Create a new server using the [`Settings`] and [`Dispatch`] implementation
     ///
     /// Also returns a [`Stopper`] that can be used to halt the server's operation
-    pub fn new_server_stoppable<D,M>(
+    pub fn new_server_stoppable<D, M>(
         dispatch: D,
         mut settings: Settings<M>,
     ) -> (
@@ -107,7 +112,10 @@ pub mod dispatch_impl {
 
 /// A [`WireTx`] impl using tokio mpsc channels
 #[derive(Clone)]
-pub struct ChannelWireTx<M> where M: HeaderMode {
+pub struct ChannelWireTx<M>
+where
+    M: HeaderMode,
+{
     tx: mpsc::Sender<Vec<u8>>,
     log_ctr: Arc<AtomicU32>,
     stopper: Option<Stopper>,
@@ -187,7 +195,7 @@ where
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key,VarSeq::Seq4(ctr));
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key, VarSeq::Seq4(ctr));
         let msg = s.to_string();
 
         self.send::<<LoggingTopic as Topic>::Message>(wh, &msg)
@@ -206,7 +214,7 @@ where
             VarKeyKind::Key4 => VarKey::Key4(LoggingTopic::TOPIC_KEY4),
             VarKeyKind::Key8 => VarKey::Key8(LoggingTopic::TOPIC_KEY),
         };
-        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key,VarSeq::Seq4(ctr));
+        let wh = Type::<<Self::Mode as HeaderMode>::HeaderType>::new(key, VarSeq::Seq4(ctr));
         let mut buf = wh.write_to_vec();
         let msg = format!("{a}");
         let msg = postcard::to_stdvec(&msg).unwrap();
@@ -248,7 +256,11 @@ where
 {
     /// Create a new [`ChannelWireRx`]
     pub fn new(rx: mpsc::Receiver<Vec<u8>>) -> Self {
-        Self { rx, stopper: None, _hm: PhantomData }
+        Self {
+            rx,
+            stopper: None,
+            _hm: PhantomData,
+        }
     }
 
     /// Add a stopper to listen for "close" methods
@@ -258,7 +270,7 @@ where
 }
 
 impl<M> WireRx for ChannelWireRx<M>
-where 
+where
     M: HeaderMode,
     M::HeaderType: Header,
 {
@@ -267,7 +279,11 @@ where
 
     async fn receive<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::Error> {
         // todo: some kind of receive_owned?
-        let ChannelWireRx { rx, stopper , _hm: PhantomData } = self;
+        let ChannelWireRx {
+            rx,
+            stopper,
+            _hm: PhantomData,
+        } = self;
         let stop_fut = async {
             if let Some(s) = stopper.as_ref() {
                 s.wait_stopped().await;

@@ -22,14 +22,14 @@ use crate::{
 use core::marker::PhantomData;
 
 #[derive(Debug)]
-pub(crate) struct Subscriptions<'a,Mode: HeaderMode> {
-    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcMessage<'a,Mode>>)>,
-    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcMessage<'a,Mode>>)>,
+pub(crate) struct Subscriptions<'a, Mode: HeaderMode> {
+    pub(crate) exclusive_list: Vec<(Key, mpsc::Sender<RpcMessage<'a, Mode>>)>,
+    pub(crate) broadcast_list: Vec<(Key, broadcast::Sender<RpcMessage<'a, Mode>>)>,
     pub(crate) stopped: bool,
     _hm: core::marker::PhantomData<Mode>,
 }
 
-impl<'a,Mode> Default for Subscriptions<'a,Mode>
+impl<'a, Mode> Default for Subscriptions<'a, Mode>
 where
     Mode: HeaderMode,
 {
@@ -152,7 +152,8 @@ where
         WSP: WireSpawn,
     {
         // let (me, wire_ctx) = Self::new_manual_priv(config);
-        let me_wire_ctx : (HostClient<WireErr,Mode>,WireContext<Mode>) = Self::new_manual_priv(config);
+        let me_wire_ctx: (HostClient<WireErr, Mode>, WireContext<Mode>) =
+            Self::new_manual_priv(config);
         let (me, wire_ctx) = me_wire_ctx;
 
         let WireContext {
@@ -174,7 +175,7 @@ where
 }
 
 /// Output worker, feeding frames to the `Client`.
-async fn out_worker<'a, W, Mode>(wire: W, rec: mpsc::Receiver<RpcMessage<'a,Mode>>, stop: Stopper)
+async fn out_worker<'a, W, Mode>(wire: W, rec: mpsc::Receiver<RpcMessage<'a, Mode>>, stop: Stopper)
 where
     W: WireTx,
     W::Error: Debug,
@@ -192,7 +193,7 @@ where
     }
 }
 
-async fn out_worker_inner<'a, W, Mode>(mut wire: W, mut rec: mpsc::Receiver<RpcMessage<'a,Mode>>)
+async fn out_worker_inner<'a, W, Mode>(mut wire: W, mut rec: mpsc::Receiver<RpcMessage<'a, Mode>>)
 where
     W: WireTx,
     W::Error: Debug,
@@ -214,7 +215,7 @@ where
 async fn in_worker<'a, W, Mode>(
     wire: W,
     host_ctx: Arc<HostContext<Mode>>,
-    subscriptions: Arc<Mutex<Subscriptions<'a,Mode>>>,
+    subscriptions: Arc<Mutex<Subscriptions<'a, Mode>>>,
     stop: Stopper,
 ) where
     W: WireRx,

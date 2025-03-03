@@ -10,7 +10,7 @@ use postcard_schema::Schema;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    header::{Header, HeaderMode, VarSeqKind, Unicast},
+    header::{Unicast, VarSeqKind},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
 };
 

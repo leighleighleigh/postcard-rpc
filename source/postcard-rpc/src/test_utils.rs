@@ -2,7 +2,9 @@
 
 use core::{fmt::Display, future::Future};
 
-use crate::header::{Header, HeaderMode, VarHeader, VarKey, VarSeq, Unicast, UnicastHeader, RpcMessage};
+use crate::header::{
+    Header, HeaderMode, RpcMessage, Unicast, UnicastHeader, VarHeader, VarKey, VarSeq,
+};
 use crate::host_client::util::Stopper;
 use crate::{
     host_client::{WireRx, WireSpawn, WireTx},
