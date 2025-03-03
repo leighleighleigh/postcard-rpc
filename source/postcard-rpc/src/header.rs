@@ -891,11 +891,11 @@ impl Addressable for BroadcastHeader {
     }
 
     fn localhost() -> Self::AddressType {
-        MacAddress::broadcast()
+        MacAddress::localhost()
     }
 
     fn broadcast() -> Self::AddressType {
-        MacAddress::localhost()
+        MacAddress::broadcast()
     }
 }
 

@@ -592,3 +592,56 @@ async fn end_to_end_stoppable() {
         Err(_) => panic!("Server task did not stop!"),
     }
 }
+
+#[tokio::test]
+async fn end_to_end_routed() {
+    let (client_tx, server_rx) = mpsc::channel(16);
+    let (server_tx, client_rx) = mpsc::channel(16);
+    let topic_ctr = Arc::new(AtomicUsize::new(0));
+
+    let app = BroadcastSingleDispatcher::new(
+        TestContext {
+            ctr: Arc::new(AtomicUsize::new(0)),
+            topic_ctr: topic_ctr.clone(),
+            msg: String::from("hello"),
+        },
+        ChannelWireSpawn {},
+    );
+
+    let cwrx = ChannelWireRx::new(server_rx);
+    let cwtx = ChannelWireTx::new(server_tx);
+    let kkind = app.min_key_len();
+    let report = app.device_map;
+    let mut server = new_server::<_,Broadcast>(
+        app,
+        Settings {
+            tx: cwtx,
+            rx: cwrx,
+            buf: 1024,
+            kkind,
+        },
+    );
+
+    tokio::task::spawn(async move {
+        server.run().await;
+    });
+
+    // HOST CLIENT SIDE
+    let cli: HostClient<_, Broadcast> = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let schema = cli.get_schema_report_from(addr).await.unwrap();
+
+    for ep in &schema.endpoints {
+        println!("'{}': {} -> {}", ep.path, ep.req_ty, ep.resp_ty);
+    }
+    for tp in &schema.topics_in {
+        println!("'{}' ---> {}", tp.path, tp.ty);
+    }
+    for tp in &schema.topics_out {
+        println!("'{}' <--- {}", tp.path, tp.ty);
+    }
+
+    assert_eq!(schema.endpoints.len(), report.endpoints.len());
+    assert_eq!(schema.topics_in.len(), report.topics_in.len());
+    assert_eq!(schema.topics_out.len(), report.topics_out.len());
+}

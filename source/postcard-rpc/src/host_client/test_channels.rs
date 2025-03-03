@@ -3,6 +3,7 @@
 use crate::{
     header::{HeaderMode, VarSeqKind},
     host_client::{HostClient, WireRx, WireSpawn, WireTx},
+    host_client::middleware::{ClientBufferedRx, ClientBufferedTx},
     standard_icd::WireError,
 };
 use core::fmt::Display;
@@ -20,6 +21,25 @@ where
     HostClient::new_with_wire(
         ChannelTx { tx },
         ChannelRx { rx },
+        TokSpawn,
+        seq_kind,
+        crate::standard_icd::ERROR_PATH,
+        64,
+    )
+}
+
+/// Create a new hostclient from the given MPSC channels, with buffering
+pub fn new_from_channels_buffered<Mode>(
+    tx: mpsc::Sender<Vec<u8>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    seq_kind: VarSeqKind,
+) -> HostClient<WireError, Mode>
+where
+    Mode: HeaderMode + Send,
+{
+    HostClient::new_with_wire(
+        ClientBufferedTx::<ChannelTx,Mode>::new(ChannelTx { tx }),
+        ClientBufferedRx::<ChannelRx,Mode>::new(ChannelRx { rx }),
         TokSpawn,
         seq_kind,
         crate::standard_icd::ERROR_PATH,

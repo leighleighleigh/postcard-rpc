@@ -32,17 +32,21 @@ pub mod dispatch_impl {
     pub use crate::host_client::util::Stopper;
     use crate::{
         header::{HeaderMode, VarKeyKind},
-        server::{Dispatch, Server},
+        server::{Dispatch, Server, WireRx, WireTx},
     };
 
     pub use super::tokio_spawn as spawn_fn;
 
     /// The settings necessary for creating a new channel server
-    pub struct Settings<M: HeaderMode> {
+    pub struct Settings<M: HeaderMode,T,R>
+    where 
+        T: WireTx<Mode = M>,
+        R: WireRx<Mode = M>,
+    {
         /// The frame sender
-        pub tx: WireTxImpl<M>,
+        pub tx: T,
         /// The frame receiver
-        pub rx: WireRxImpl<M>,
+        pub rx: R,
         /// The size of the receive buffer
         pub buf: usize,
         /// The sender key size to use
@@ -58,10 +62,32 @@ pub mod dispatch_impl {
     /// Type alias for the receive buffer
     pub type WireRxBuf = Box<[u8]>;
 
+    /// Create a new server using the [`Settings`] and [`Dispatch`] implementation,
+    /// and custom `WireTx` and `WireRx` implementations
+    pub fn new_server_raw<D, M, T, R>(
+        dispatch: D,
+        settings: Settings<M,T,R>,
+    ) -> crate::server::Server<T, R, WireRxBuf, D, M>
+    where
+        T: WireTx<Mode = M>,
+        R: WireRx<Mode = M>,
+        D: Dispatch<Tx = T, Mode = M>,
+        M: HeaderMode,
+    {
+        let buf = vec![0; settings.buf];
+        Server::new(
+            settings.tx,
+            settings.rx,
+            buf.into_boxed_slice(),
+            dispatch,
+            settings.kkind,
+        )
+    }
+
     /// Create a new server using the [`Settings`] and [`Dispatch`] implementation
     pub fn new_server<D, M>(
         dispatch: D,
-        settings: Settings<M>,
+        settings: Settings<M,WireTxImpl<M>,WireRxImpl<M>>,
     ) -> crate::server::Server<WireTxImpl<M>, WireRxImpl<M>, WireRxBuf, D, M>
     where
         D: Dispatch<Tx = WireTxImpl<M>, Mode = M>,
@@ -82,7 +108,7 @@ pub mod dispatch_impl {
     /// Also returns a [`Stopper`] that can be used to halt the server's operation
     pub fn new_server_stoppable<D, M>(
         dispatch: D,
-        mut settings: Settings<M>,
+        mut settings: Settings<M,WireTxImpl<M>,WireRxImpl<M>>,
     ) -> (
         crate::server::Server<WireTxImpl<M>, WireRxImpl<M>, WireRxBuf, D, M>,
         Stopper,

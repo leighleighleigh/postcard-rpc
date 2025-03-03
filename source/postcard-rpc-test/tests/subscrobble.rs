@@ -263,7 +263,7 @@ async fn exclusive_subs_work() {
     });
 
     // Subbing works
-    let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let cli = client::new_from_channels::<Unicast>(client_tx, client_rx, VarSeqKind::Seq1);
     #[allow(deprecated)]
     let mut sub = cli.subscribe::<ZetaTopic10>(16).await.unwrap();
     server_sender
@@ -401,7 +401,7 @@ async fn broadcast_subs_work() {
     tokio::task::spawn(async move {
         server.run().await;
     });
-    let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let cli = client::new_from_channels::<Unicast>(client_tx, client_rx, VarSeqKind::Seq1);
 
     // Multi-Subbing works
     let mut sub1 = cli.subscribe_multi::<ZetaTopic10>(16).await.unwrap();

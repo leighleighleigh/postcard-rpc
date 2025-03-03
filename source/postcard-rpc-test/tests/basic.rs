@@ -10,16 +10,16 @@ use tokio::{sync::mpsc, task::yield_now, time::timeout};
 
 use postcard_rpc::{
     define_dispatch, endpoints,
-    header::{Broadcast, Header, HeaderImplMeta, Unicast, UnicastHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind},
+    header::{Header, Unicast, UnicastHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind},
     host_client::{test_channels as client, HostClient},
     server::{
         impls::test_channels::{
             dispatch_impl::{
-                new_server, new_server_stoppable, spawn_fn, Settings, WireSpawnImpl, WireTxImpl,
+                new_server, new_server_raw, new_server_stoppable, spawn_fn, Settings, WireSpawnImpl, WireTxImpl,
             },
             ChannelWireRx, ChannelWireSpawn, ChannelWireTx,
         },
-        Dispatch, Sender, SpawnContext,
+        Dispatch, Sender, SpawnContext, BufferedTx,
     },
     topics, Endpoint, Topic,
 };

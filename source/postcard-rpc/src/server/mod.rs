@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Definitions of a postcard-rpc Server
 //!
 //! The Server role is responsible for accepting endpoint requests, issuing
@@ -26,6 +27,8 @@
 pub mod dispatch_macro;
 
 pub mod impls;
+
+pub mod middleware;
 
 use core::{fmt::Arguments, ops::DerefMut};
 
@@ -439,15 +442,15 @@ where
     Rx: WireRx,
 {
     /// A fatal error occurred with the [`WireTx::send()`] implementation
-    TxFatal(Tx::Error),
+    TxFatal(Option<Tx::Error>),
     /// A fatal error occurred with the [`WireRx::receive()`] implementation
-    RxFatal(Rx::Error),
+    RxFatal(Option<Rx::Error>),
 }
 
 impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
-    Tx: WireTx,
-    Rx: WireRx,
+    Tx: WireTx<Mode = Mode>,
+    Rx: WireRx<Mode = Mode>,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx, Mode = Mode>,
     Mode: HeaderMode,
@@ -491,30 +494,37 @@ where
                 dis: d,
                 _hm,
             } = self;
-            let used = match rx.receive(buf).await {
+
+            let msg = match rx.receive_frame(buf).await {
                 Ok(u) => u,
                 Err(e) => {
-                    let kind = e.as_kind();
-                    match kind {
-                        WireRxErrorKind::ConnectionClosed => return ServerError::RxFatal(e),
+                    match e {
+                        WireRxErrorKind::ConnectionClosed => return ServerError::RxFatal(None),
                         WireRxErrorKind::ReceivedMessageTooLarge => continue,
                         WireRxErrorKind::Other => continue,
                         WireRxErrorKind::DeserFailed => continue,
                     }
                 }
             };
-            let Some((hdr, body)) = Mode::HeaderType::take_from_slice(used) else {
-                // TODO: send a nak on badly formed messages? We don't have
-                // much to say because we don't have a key or seq no or anything
-                continue;
-            };
+
+            // let Some((hdr, body)) = Mode::HeaderType::take_from_slice(used) else {
+            //     // TODO: send a nak on badly formed messages? We don't have
+            //     // much to say because we don't have a key or seq no or anything
+            //     continue;
+            // };
+            let hdr = msg.header;
+            #[cfg(feature = "use-std")]
+            let body = msg.body.as_slice();
+            #[cfg(not(feature = "use-std"))]
+            let body = &msg.body;
+
             let fut = d.handle(tx, &hdr, body);
             if let Err(e) = fut.await {
                 let kind = e.as_kind();
                 match kind {
-                    WireTxErrorKind::ConnectionClosed => return ServerError::TxFatal(e),
+                    WireTxErrorKind::ConnectionClosed => return ServerError::TxFatal(Some(e)),
                     WireTxErrorKind::Other => {}
-                    WireTxErrorKind::Timeout => return ServerError::TxFatal(e),
+                    WireTxErrorKind::Timeout => return ServerError::TxFatal(Some(e)),
                 }
             }
         }
@@ -560,6 +570,7 @@ pub trait Dispatch {
         body: &[u8],
     ) -> Result<(), <Self::Tx as WireTx>::Error>;
 }
+
 
 //////////////////////////////////////////////////////////////////////////////
 // SPAWNCONTEXT TRAIT

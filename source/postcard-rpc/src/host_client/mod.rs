@@ -49,6 +49,8 @@ pub mod webusb;
 
 pub(crate) mod util;
 
+pub mod middleware;
+
 #[cfg(feature = "test-utils")]
 pub mod test_channels;
 
@@ -639,8 +641,7 @@ where
 
         let msg = postcard::to_stdvec(&t).expect("Allocations should not ever fail");
         let frame = RpcMessage::new(
-            Mode::HeaderType::new(VarKey::Key8(E::REQ_KEY), VarSeq::Seq4(seq_no))
-                .with_dst(server_addr),
+            Mode::HeaderType::new(VarKey::Key8(E::REQ_KEY), VarSeq::Seq4(seq_no)).with_src(<Mode::HeaderType as Addressable>::localhost()).with_dst(server_addr),
         )
         .with_body(msg);
         let frame = self.send_resp_raw(frame, E::RESP_KEY).await?;
