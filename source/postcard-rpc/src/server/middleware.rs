@@ -34,23 +34,18 @@ where
     type Mode = T::Mode;
 
     async fn send<M: Serialize + ?Sized>(&self, hdr: <Self::Mode as HeaderMode>::HeaderType, msg: &M) -> Result<(), Self::Error> {
-        // println!("BufferedTx::send");
-        println!("BufferedTx::send: {:?}", hdr);
         self.tx.send(hdr, msg).await
     }
 
     async fn send_raw(&self, buf: &[u8]) -> Result<(), Self::Error> {
-        println!("BufferedTx::send_raw: {:?}", buf);
         self.tx.send_raw(buf).await
     }
 
     async fn send_log_str(&self, kkind: VarKeyKind, s: &str) -> Result<(), Self::Error> {
-        println!("BufferedTx::send_log_str: {:?}", s);
         self.tx.send_log_str(kkind, s).await
     }
 
     async fn send_log_fmt<'a>(&self, kkind: VarKeyKind, a: Arguments<'a>) -> Result<(), Self::Error> {
-        println!("BufferedTx::send_log_fmt: {:?}", a);
         self.tx.send_log_fmt(kkind, a).await
     }
 }
@@ -85,11 +80,9 @@ where
     async fn receive_frame<'a>(&mut self, buf: &'a mut [u8]) -> Result<RpcMessage<'a, Self::Mode>, WireRxErrorKind> {
         match self.rx.receive_frame(buf).await {
             Err(e) => {
-                println!("BufferedRx::receive_frame: {:?}", e.as_kind());
                 Err(e)
             },
             Ok(result) => {
-                println!("BufferedRx::receive_frame: {:?}", &result.header);
                 Ok(result)
             }
         }
@@ -99,11 +92,9 @@ where
     {
         match self.rx.receive(buf).await {
             Err(e) => {
-                println!("BufferedRx::receive: {:?}", e.as_kind());
                 Err(e)
             },
             Ok(result) => {
-                println!("BufferedRx::receive: {:?}", &result);
                 Ok(result)
             }
         }
