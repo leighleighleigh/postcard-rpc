@@ -144,7 +144,7 @@ version  = "0.4"
 optional = true
 
 [dependencies.portable-atomic]
-version          = "1.0"
+version          = "1.11.0"
 default-features = false
 
 [dependencies.embedded-io-async-0_6]
