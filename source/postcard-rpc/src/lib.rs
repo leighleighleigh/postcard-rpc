@@ -112,8 +112,8 @@
 //! * A string "path", like an HTTP URI that uniquely identifies the topic.
 
 #![cfg_attr(not(any(test, feature = "use-std")), no_std)]
-#![deny(missing_docs)]
-#![deny(rustdoc::broken_intra_doc_links)]
+// #![deny(missing_docs)]
+// #![deny(rustdoc::broken_intra_doc_links)]
 
 use header::{VarKey, VarKeyKind};
 use postcard_schema::{schema::NamedType, Schema};

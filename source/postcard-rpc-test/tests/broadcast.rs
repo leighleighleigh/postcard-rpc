@@ -10,16 +10,16 @@ use tokio::{sync::mpsc, task::yield_now, time::timeout};
 
 use postcard_rpc::{
     define_dispatch, endpoints,
-    header::{Header, Unicast, UnicastHeader, VarKey, VarKeyKind, VarSeq, VarSeqKind},
+    header::{Addressable, Broadcast, BroadcastHeader, Header, HeaderImplMeta, HeaderMode, VarKey, VarKeyKind, VarSeq, VarSeqKind},
     host_client::{test_channels as client, HostClient},
     server::{
         impls::test_channels::{
             dispatch_impl::{
-                new_server, new_server_raw, new_server_stoppable, spawn_fn, Settings, WireSpawnImpl, WireTxImpl,
+                new_server, new_server_stoppable, spawn_fn, Settings, WireSpawnImpl, WireTxImpl,
             },
             ChannelWireRx, ChannelWireSpawn, ChannelWireTx,
         },
-        Dispatch, Sender, SpawnContext, BufferedTx,
+        Dispatch, Sender, SpawnContext,
     },
     topics, Endpoint, Topic,
 };
@@ -125,10 +125,10 @@ impl SpawnContext for TestContext {
 }
 
 define_dispatch! {
-    app: SingleDispatcher;
+    app: BroadcastSingleDispatcher;
     spawn_fn: spawn_fn;
-    tx_impl: WireTxImpl<Unicast>;
-    hd_mode: Unicast;
+    tx_impl: WireTxImpl<Broadcast>;
+    hd_mode: Broadcast;
     spawn_impl: WireSpawnImpl;
     context: TestContext;
 
@@ -159,7 +159,7 @@ define_dispatch! {
 
 fn test_borrowep_blocking2(
     context: &mut TestContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: (),
 ) -> Message<'_> {
     Message {
@@ -169,7 +169,7 @@ fn test_borrowep_blocking2(
 
 fn test_borrowep_blocking(
     _context: &mut TestContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: Message<'_>,
 ) -> u8 {
     0
@@ -177,55 +177,53 @@ fn test_borrowep_blocking(
 
 fn test_zeta_blocking(
     context: &mut TestContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx<Unicast>, Unicast>,
+    _out: &Sender<ChannelWireTx<Broadcast>, Broadcast>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 fn test_borrow_blocking(
     context: &mut TestContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: Message,
-    _out: &Sender<ChannelWireTx<Unicast>, Unicast>,
+    _out: &Sender<ChannelWireTx<Broadcast>, Broadcast>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 async fn test_zeta_async(
     context: &mut TestContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: ZMsg,
-    _out: &Sender<ChannelWireTx<Unicast>, Unicast>,
+    _out: &Sender<ChannelWireTx<Broadcast>, Broadcast>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
 async fn test_zeta_spawn(
     context: TestSpawnContext,
-    _header: UnicastHeader,
+    _header: BroadcastHeader,
     _body: ZMsg,
-    _out: Sender<ChannelWireTx<Unicast>, Unicast>,
+    _out: Sender<ChannelWireTx<Broadcast>, Broadcast>,
 ) {
     context.topic_ctr.fetch_add(1, Ordering::Relaxed);
 }
 
-async fn test_alpha_handler(context: &mut TestContext, _header: UnicastHeader, body: AReq) -> AResp {
+async fn test_alpha_handler(context: &mut TestContext, _header: BroadcastHeader, body: AReq) -> AResp {
     context.ctr.fetch_add(1, Ordering::Relaxed);
     AResp(body.0)
 }
 
 async fn test_beta_handler(
     context: TestSpawnContext,
-    header: UnicastHeader,
+    header: BroadcastHeader,
     body: BReq,
-    out: Sender<ChannelWireTx<Unicast>, Unicast>,
+    out: Sender<ChannelWireTx<Broadcast>, Broadcast>,
 ) {
     context.ctr.fetch_add(1, Ordering::Relaxed);
-    let _ = out
-        .reply::<BetaEndpoint>(&header, &BResp(body.0.into()))
-        .await;
+    let _ = out.reply::<BetaEndpoint>(&header, &BResp(body.0.into())).await;
 }
 
 #[tokio::test]
@@ -234,7 +232,7 @@ async fn smoke() {
     let (server_tx, mut client_rx) = mpsc::channel(16);
     let topic_ctr = Arc::new(AtomicUsize::new(0));
 
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -246,7 +244,7 @@ async fn smoke() {
     let cwrx = ChannelWireRx::new(server_rx);
     let cwtx = ChannelWireTx::new(server_tx);
     let kkind = app.min_key_len();
-    let mut server = new_server::<_,Unicast>(
+    let mut server = new_server::<_,Broadcast>(
         app,
         Settings {
             tx: cwtx,
@@ -260,48 +258,36 @@ async fn smoke() {
     });
 
     // manually build request - Alpha
-    let mut msg = UnicastHeader {
-        key: VarKey::Key8(AlphaEndpoint::REQ_KEY),
-        seq_no: VarSeq::Seq4(123),
-    }
-    .write_to_vec();
+    let mut msg = BroadcastHeader::new(VarKey::Key8(AlphaEndpoint::REQ_KEY),VarSeq::Seq4(123)).write_to_vec();
     let body = postcard::to_stdvec(&AReq(42)).unwrap();
     msg.extend_from_slice(&body);
     client_tx.send(msg).await.unwrap();
     let resp = client_rx.recv().await.unwrap();
 
     // manually extract response
-    let (hdr, body) = UnicastHeader::take_from_slice(&resp).unwrap();
+    let (hdr, body) = BroadcastHeader::take_from_slice(&resp).unwrap();
     let resp = postcard::from_bytes::<<AlphaEndpoint as Endpoint>::Response>(body).unwrap();
     assert_eq!(resp.0, 42);
-    assert_eq!(hdr.key, VarKey::Key8(AlphaEndpoint::RESP_KEY));
-    assert_eq!(hdr.seq_no, VarSeq::Seq4(123));
+    assert_eq!(hdr.key(), &VarKey::Key8(AlphaEndpoint::RESP_KEY));
+    assert_eq!(hdr.seq_no(), &VarSeq::Seq4(123));
 
     // manually build request - Beta
-    let mut msg = UnicastHeader {
-        key: VarKey::Key8(BetaEndpoint::REQ_KEY),
-        seq_no: VarSeq::Seq4(234),
-    }
-    .write_to_vec();
+    let mut msg = BroadcastHeader::new(VarKey::Key8(BetaEndpoint::REQ_KEY),VarSeq::Seq4(234)).write_to_vec();
     let body = postcard::to_stdvec(&BReq(1000)).unwrap();
     msg.extend_from_slice(&body);
     client_tx.send(msg).await.unwrap();
     let resp = client_rx.recv().await.unwrap();
 
     // manually extract response
-    let (hdr, body) = UnicastHeader::take_from_slice(&resp).unwrap();
+    let (hdr, body) = BroadcastHeader::take_from_slice(&resp).unwrap();
     let resp = postcard::from_bytes::<<BetaEndpoint as Endpoint>::Response>(body).unwrap();
     assert_eq!(resp.0, 1000);
-    assert_eq!(hdr.key, VarKey::Key8(BetaEndpoint::RESP_KEY));
-    assert_eq!(hdr.seq_no, VarSeq::Seq4(234));
+    assert_eq!(hdr.key(), &VarKey::Key8(BetaEndpoint::RESP_KEY));
+    assert_eq!(hdr.seq_no(), &VarSeq::Seq4(234));
 
     // blocking topic handler
     for i in 0..3 {
-        let mut msg = UnicastHeader {
-            key: VarKey::Key8(ZetaTopic1::TOPIC_KEY),
-            seq_no: VarSeq::Seq4(i),
-        }
-        .write_to_vec();
+        let mut msg = BroadcastHeader::new(VarKey::Key8(ZetaTopic1::TOPIC_KEY),VarSeq::Seq4(i)).write_to_vec();
 
         let body = postcard::to_stdvec(&ZMsg(456)).unwrap();
         msg.extend_from_slice(&body);
@@ -323,11 +309,7 @@ async fn smoke() {
 
     // async topic handler
     for i in 0..3 {
-        let mut msg = UnicastHeader {
-            key: VarKey::Key8(ZetaTopic2::TOPIC_KEY),
-            seq_no: VarSeq::Seq4(i),
-        }
-        .write_to_vec();
+        let mut msg = BroadcastHeader::new(VarKey::Key8(ZetaTopic2::TOPIC_KEY),VarSeq::Seq4(i)).write_to_vec();
         let body = postcard::to_stdvec(&ZMsg(456)).unwrap();
         msg.extend_from_slice(&body);
         client_tx.send(msg).await.unwrap();
@@ -348,11 +330,12 @@ async fn smoke() {
 
     // spawn topic handler
     for i in 0..3 {
-        let mut msg = UnicastHeader {
-            key: VarKey::Key8(ZetaTopic3::TOPIC_KEY),
-            seq_no: VarSeq::Seq4(i),
-        }
-        .write_to_vec();
+        let mut msg = BroadcastHeader::new(
+            VarKey::Key8(ZetaTopic3::TOPIC_KEY),
+            VarSeq::Seq4(i)).write_to_vec();
+
+        // let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+
         let body = postcard::to_stdvec(&ZMsg(456)).unwrap();
         msg.extend_from_slice(&body);
         client_tx.send(msg).await.unwrap();
@@ -378,7 +361,7 @@ async fn end_to_end() {
     let (server_tx, client_rx) = mpsc::channel(16);
     let topic_ctr = Arc::new(AtomicUsize::new(0));
 
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -391,7 +374,7 @@ async fn end_to_end() {
     let cwtx = ChannelWireTx::new(server_tx);
 
     let kkind = app.min_key_len();
-    let mut server = new_server::<_,Unicast>(
+    let mut server = new_server::<_,Broadcast>(
         app,
         Settings {
             tx: cwtx,
@@ -404,11 +387,11 @@ async fn end_to_end() {
         server.run().await;
     });
 
-    let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
-
-    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let cli = client::new_from_channels::<Broadcast>(client_tx, client_rx, VarSeqKind::Seq1);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let resp = cli.send_request_to::<AlphaEndpoint>(addr,&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
-    let resp = cli.send_request::<BetaEndpoint>(&BReq(1234)).await.unwrap();
+    let resp = cli.send_request_to::<BetaEndpoint>(addr,&BReq(1234)).await.unwrap();
     assert_eq!(resp.0, 1234);
 }
 
@@ -418,7 +401,7 @@ async fn end_to_end_schema() {
     let (server_tx, client_rx) = mpsc::channel(16);
     let topic_ctr = Arc::new(AtomicUsize::new(0));
 
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -432,7 +415,7 @@ async fn end_to_end_schema() {
 
     let kkind = app.min_key_len();
     let report = app.device_map;
-    let mut server = new_server::<_,Unicast>(
+    let mut server = new_server::<_,Broadcast>(
         app,
         Settings {
             tx: cwtx,
@@ -445,8 +428,9 @@ async fn end_to_end_schema() {
         server.run().await;
     });
 
-    let cli: HostClient<_, Unicast> = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
-    let schema = cli.get_schema_report().await.unwrap();
+    let cli: HostClient<_, Broadcast> = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let schema = cli.get_schema_report_from(addr).await.unwrap();
 
     for ep in &schema.endpoints {
         println!("'{}': {} -> {}", ep.path, ep.req_ty, ep.resp_ty);
@@ -469,7 +453,7 @@ async fn end_to_end_force8() {
     let (server_tx, client_rx) = mpsc::channel(16);
     let topic_ctr = Arc::new(AtomicUsize::new(0));
 
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -482,7 +466,7 @@ async fn end_to_end_force8() {
     let cwtx = ChannelWireTx::new(server_tx);
 
     let kkind = VarKeyKind::Key8;
-    let mut server = new_server::<_,Unicast>(
+    let mut server = new_server::<_,Broadcast>(
         app,
         Settings {
             tx: cwtx,
@@ -495,18 +479,18 @@ async fn end_to_end_force8() {
         server.run().await;
     });
 
-    let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq4);
-
-    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let cli = client::new_from_channels::<Broadcast>(client_tx, client_rx, VarSeqKind::Seq4);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let resp = cli.send_request_to::<AlphaEndpoint>(addr,&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
-    let resp = cli.send_request::<BetaEndpoint>(&BReq(1234)).await.unwrap();
+    let resp = cli.send_request_to::<BetaEndpoint>(addr,&BReq(1234)).await.unwrap();
     assert_eq!(resp.0, 1234);
 }
 
 #[test]
 fn device_map() {
     let topic_ctr = Arc::new(AtomicUsize::new(0));
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -515,7 +499,7 @@ fn device_map() {
         ChannelWireSpawn {},
     );
 
-    println!("# SingleDispatcher");
+    println!("# BroadcastSingleDispatcher");
     println!();
 
     println!("## Types");
@@ -571,7 +555,7 @@ async fn end_to_end_stoppable() {
     let (server_tx, client_rx) = mpsc::channel(16);
     let topic_ctr = Arc::new(AtomicUsize::new(0));
 
-    let app = SingleDispatcher::new(
+    let app = BroadcastSingleDispatcher::new(
         TestContext {
             ctr: Arc::new(AtomicUsize::new(0)),
             topic_ctr: topic_ctr.clone(),
@@ -584,7 +568,7 @@ async fn end_to_end_stoppable() {
     let cwtx = ChannelWireTx::new(server_tx);
 
     let kkind = app.min_key_len();
-    let (mut server, stopper) = new_server_stoppable::<_,Unicast>(
+    let (mut server, stopper) = new_server_stoppable::<_,Broadcast>(
         app,
         Settings {
             tx: cwtx,
@@ -597,9 +581,9 @@ async fn end_to_end_stoppable() {
         server.run().await;
     });
 
-    let cli = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
-
-    let resp = cli.send_request::<AlphaEndpoint>(&AReq(42)).await.unwrap();
+    let cli = client::new_from_channels::<Broadcast>(client_tx, client_rx, VarSeqKind::Seq1);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let resp = cli.send_request_to::<AlphaEndpoint>(addr,&AReq(42)).await.unwrap();
     assert_eq!(resp.0, 42);
     stopper.stop();
     match timeout(Duration::from_millis(100), hdl).await {
@@ -607,4 +591,57 @@ async fn end_to_end_stoppable() {
         Ok(Err(e)) => panic!("Server task panicked? {e:?}"),
         Err(_) => panic!("Server task did not stop!"),
     }
+}
+
+#[tokio::test]
+async fn end_to_end_routed() {
+    let (client_tx, server_rx) = mpsc::channel(16);
+    let (server_tx, client_rx) = mpsc::channel(16);
+    let topic_ctr = Arc::new(AtomicUsize::new(0));
+
+    let app = BroadcastSingleDispatcher::new(
+        TestContext {
+            ctr: Arc::new(AtomicUsize::new(0)),
+            topic_ctr: topic_ctr.clone(),
+            msg: String::from("hello"),
+        },
+        ChannelWireSpawn {},
+    );
+
+    let cwrx = ChannelWireRx::new(server_rx);
+    let cwtx = ChannelWireTx::new(server_tx);
+    let kkind = app.min_key_len();
+    let report = app.device_map;
+    let mut server = new_server::<_,Broadcast>(
+        app,
+        Settings {
+            tx: cwtx,
+            rx: cwrx,
+            buf: 1024,
+            kkind,
+        },
+    );
+
+    tokio::task::spawn(async move {
+        server.run().await;
+    });
+
+    // HOST CLIENT SIDE
+    let cli: HostClient<_, Broadcast> = client::new_from_channels(client_tx, client_rx, VarSeqKind::Seq1);
+    let addr = <<Broadcast as HeaderMode>::HeaderType as Addressable>::broadcast();
+    let schema = cli.get_schema_report_from(addr).await.unwrap();
+
+    for ep in &schema.endpoints {
+        println!("'{}': {} -> {}", ep.path, ep.req_ty, ep.resp_ty);
+    }
+    for tp in &schema.topics_in {
+        println!("'{}' ---> {}", tp.path, tp.ty);
+    }
+    for tp in &schema.topics_out {
+        println!("'{}' <--- {}", tp.path, tp.ty);
+    }
+
+    assert_eq!(schema.endpoints.len(), report.endpoints.len());
+    assert_eq!(schema.topics_in.len(), report.topics_in.len());
+    assert_eq!(schema.topics_out.len(), report.topics_out.len());
 }

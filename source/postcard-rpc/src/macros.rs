@@ -477,7 +477,7 @@ mod endpoints_test {
         for ep in ENDPOINT_LIST.endpoints {
             println!("{}", ep.0);
         }
-        assert_eq!(ENDPOINT_LIST.endpoints.len(), 5);
+        assert_eq!(ENDPOINT_LIST.endpoints.len(), 6);
     }
 
     #[test]

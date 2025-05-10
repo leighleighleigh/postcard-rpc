@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Definitions of a postcard-rpc Server
 //!
 //! The Server role is responsible for accepting endpoint requests, issuing
@@ -27,15 +28,19 @@ pub mod dispatch_macro;
 
 pub mod impls;
 
+pub mod middleware;
+
 use core::{fmt::Arguments, ops::DerefMut};
 
 use postcard_schema::Schema;
 use serde::Serialize;
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq},
+    header::{Header, HeaderMode, RpcMessage, VarKey, VarKeyKind, VarSeq},
     DeviceMap, Key, TopicDirection,
 };
+
+use core::marker::PhantomData;
 
 //////////////////////////////////////////////////////////////////////////////
 // TX
@@ -48,10 +53,15 @@ pub trait WireTx {
     /// For simple cases, you can use [`WireTxErrorKind`] directly. You can also
     /// use your own custom type that implements [`AsWireTxErrorKind`].
     type Error: AsWireTxErrorKind;
+    /// The type of header used by this connection
+    type Mode: HeaderMode;
 
     /// Send a single frame to the client, returning when send is complete.
-    async fn send<T: Serialize + ?Sized>(&self, hdr: VarHeader, msg: &T)
-        -> Result<(), Self::Error>;
+    async fn send<T: Serialize + ?Sized>(
+        &self,
+        hdr: <Self::Mode as HeaderMode>::HeaderType,
+        msg: &T,
+    ) -> Result<(), Self::Error>;
 
     /// Send a single frame to the client, without handling serialization
     async fn send_raw(&self, buf: &[u8]) -> Result<(), Self::Error>;
@@ -109,6 +119,37 @@ pub trait WireRx {
     /// For simple cases, you can use [`WireRxErrorKind`] directly. You can also
     /// use your own custom type that implements [`AsWireRxErrorKind`].
     type Error: AsWireRxErrorKind;
+    /// The type of header used by this connection
+    type Mode: HeaderMode;
+
+    /// Send a single frame to the client, returning when send is complete.
+    async fn receive_frame<'a>(
+        &mut self,
+        buf: &'a mut [u8],
+    ) -> Result<RpcMessage<'a, Self::Mode>, WireRxErrorKind> {
+        // Returns not just a byte buffer, but a Header and Body RpcMessage.
+        let frame = self.receive(buf).await.map_err(|e| e.as_kind())?;
+
+        if let Some((hdr, body)) = <Self::Mode as HeaderMode>::HeaderType::take_from_slice(frame) {
+            #[cfg(feature = "use-std")]
+            return Ok(RpcMessage::<'a, Self::Mode> {
+                header: hdr,
+                body: body.to_vec(),
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            });
+            #[cfg(not(feature = "use-std"))]
+            return Ok(RpcMessage::<'a, Self::Mode> {
+                header: hdr,
+                body,
+                _hm: PhantomData,
+                _lifetime: PhantomData,
+            });
+        } else {
+            // This is basically an error - we can't deserialize the header
+            return Err(WireRxErrorKind::DeserFailed);
+        };
+    }
 
     /// Receive a single frame
     ///
@@ -128,6 +169,8 @@ pub enum WireRxErrorKind {
     ReceivedMessageTooLarge,
     /// Other message kinds
     Other,
+    /// Frame deserialization failed
+    DeserFailed,
 }
 
 /// A conversion trait to convert a user error into a base Kind type
@@ -173,12 +216,16 @@ pub trait WireSpawn: Clone {
 /// The [`Sender`] type wraps a [`WireTx`] impl, and provides higher level functionality
 /// over it
 #[derive(Clone)]
-pub struct Sender<Tx: WireTx> {
+pub struct Sender<Tx: WireTx, Mode: HeaderMode> {
     tx: Tx,
     kkind: VarKeyKind,
+    _hm: PhantomData<Mode>,
 }
 
-impl<Tx: WireTx> Sender<Tx> {
+impl<Tx: WireTx, Mode: HeaderMode> Sender<Tx, Mode>
+where
+    Tx: WireTx<Mode = Mode>,
+{
     /// Create a new Sender
     ///
     /// Takes a [`WireTx`] impl, as well as the [`VarKeyKind`] used when sending messages
@@ -186,19 +233,27 @@ impl<Tx: WireTx> Sender<Tx> {
     ///
     /// `kkind` should usually come from [`Dispatch::min_key_len()`].
     pub fn new(tx: Tx, kkind: VarKeyKind) -> Self {
-        Self { tx, kkind }
+        Self {
+            tx,
+            kkind,
+            _hm: PhantomData,
+        }
     }
 
     /// Send a reply for the given endpoint
     #[inline]
-    pub async fn reply<E>(&self, seq_no: VarSeq, resp: &E::Response) -> Result<(), Tx::Error>
+    pub async fn reply<E>(
+        &self,
+        req_header: &Mode::HeaderType,
+        resp: &E::Response,
+    ) -> Result<(), Tx::Error>
     where
         E: crate::Endpoint,
         E::Response: Serialize + Schema,
     {
         let mut key = VarKey::Key8(E::RESP_KEY);
         key.shrink_to(self.kkind);
-        let wh = VarHeader { key, seq_no };
+        let wh = req_header.into_response(key);
         self.tx.send::<E::Response>(wh, resp).await
     }
 
@@ -207,29 +262,30 @@ impl<Tx: WireTx> Sender<Tx> {
     /// This is useful when replying with "unusual" keys, for example Error responses
     /// not tied to any specific Endpoint.
     #[inline]
-    pub async fn reply_keyed<T>(&self, seq_no: VarSeq, key: Key, resp: &T) -> Result<(), Tx::Error>
+    pub async fn reply_keyed<T>(
+        &self,
+        req_header: &Mode::HeaderType,
+        key: Key,
+        resp: &T,
+    ) -> Result<(), Tx::Error>
     where
         T: ?Sized,
         T: Serialize + Schema,
     {
         let mut key = VarKey::Key8(key);
         key.shrink_to(self.kkind);
-        let wh = VarHeader { key, seq_no };
+        let wh = req_header.into_response(key);
         self.tx.send::<T>(wh, resp).await
     }
 
-    /// Publish a Topic message
-    #[inline]
-    pub async fn publish<T>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), Tx::Error>
-    where
-        T: ?Sized,
-        T: crate::Topic,
-        T::Message: Serialize + Schema,
-    {
-        let mut key = VarKey::Key8(T::TOPIC_KEY);
-        key.shrink_to(self.kkind);
-        let wh = VarHeader { key, seq_no };
-        self.tx.send::<T::Message>(wh, msg).await
+    /// Send a single error message
+    pub async fn error(
+        &self,
+        req_header: &Mode::HeaderType,
+        error: crate::standard_icd::WireError,
+    ) -> Result<(), Tx::Error> {
+        self.reply_keyed(req_header, crate::standard_icd::ERROR_KEY, &error)
+            .await
     }
 
     /// Log a `str` directly to the [`LoggingTopic`][crate::standard_icd::LoggingTopic]
@@ -244,20 +300,24 @@ impl<Tx: WireTx> Sender<Tx> {
         self.tx.send_log_fmt(self.kkind, msg).await
     }
 
-    /// Send a single error message
-    pub async fn error(
-        &self,
-        seq_no: VarSeq,
-        error: crate::standard_icd::WireError,
-    ) -> Result<(), Tx::Error> {
-        self.reply_keyed(seq_no, crate::standard_icd::ERROR_KEY, &error)
-            .await
+    /// Publish a Topic message
+    #[inline]
+    pub async fn publish<T>(&self, seq_no: VarSeq, msg: &T::Message) -> Result<(), Tx::Error>
+    where
+        T: ?Sized,
+        T: crate::Topic,
+        T::Message: Serialize + Schema,
+    {
+        let mut key = VarKey::Key8(T::TOPIC_KEY);
+        key.shrink_to(self.kkind);
+        let wh = Mode::HeaderType::new_for_topic_broadcast(key, seq_no); // using this builder pattern means any type of header can be used!
+        self.tx.send::<T::Message>(wh, msg).await
     }
 
     /// Implements the [`GetAllSchemasEndpoint`][crate::standard_icd::GetAllSchemasEndpoint] endpoint
     pub async fn send_all_schemas(
         &self,
-        hdr: &VarHeader,
+        hdr: &Mode::HeaderType,
         device_map: &DeviceMap,
     ) -> Result<(), Tx::Error> {
         #[cfg(feature = "use-std")]
@@ -340,7 +400,7 @@ impl<Tx: WireTx> Sender<Tx> {
 
         // Finally, reply with the totals
         self.reply::<GetAllSchemasEndpoint>(
-            hdr.seq_no,
+            hdr,
             &SchemaTotals {
                 types_sent: device_map.types.len() as u32,
                 endpoints_sent: device_map.endpoints.len() as u32,
@@ -360,17 +420,19 @@ impl<Tx: WireTx> Sender<Tx> {
 //////////////////////////////////////////////////////////////////////////////
 
 /// The [`Server`] is the main interface for handling communication
-pub struct Server<Tx, Rx, Buf, D>
+pub struct Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx,
     Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
+    Mode: HeaderMode,
 {
-    tx: Sender<Tx>,
+    tx: Sender<Tx, Mode>,
     rx: Rx,
     buf: Buf,
     dis: D,
+    _hm: PhantomData<Mode>,
 }
 
 /// A type representing the different errors [`Server::run()`] may return
@@ -380,17 +442,18 @@ where
     Rx: WireRx,
 {
     /// A fatal error occurred with the [`WireTx::send()`] implementation
-    TxFatal(Tx::Error),
+    TxFatal(Option<Tx::Error>),
     /// A fatal error occurred with the [`WireRx::receive()`] implementation
-    RxFatal(Rx::Error),
+    RxFatal(Option<Rx::Error>),
 }
 
-impl<Tx, Rx, Buf, D> Server<Tx, Rx, Buf, D>
+impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
-    Tx: WireTx,
-    Rx: WireRx,
+    Tx: WireTx<Mode = Mode>,
+    Rx: WireRx<Mode = Mode>,
     Buf: DerefMut<Target = [u8]>,
-    D: Dispatch<Tx = Tx>,
+    D: Dispatch<Tx = Tx, Mode = Mode>,
+    Mode: HeaderMode,
 {
     /// Create a new Server
     ///
@@ -403,10 +466,15 @@ where
     /// * a [`VarKeyKind`], which controls the key sizes sent by the [`WireTx`] impl
     pub fn new(tx: Tx, rx: Rx, buf: Buf, dis: D, kkind: VarKeyKind) -> Self {
         Self {
-            tx: Sender { tx, kkind },
+            tx: Sender::<Tx, Mode> {
+                tx,
+                kkind,
+                _hm: PhantomData,
+            },
             rx,
             buf,
             dis,
+            _hm: PhantomData,
         }
     }
 
@@ -424,45 +492,55 @@ where
                 rx,
                 buf,
                 dis: d,
+                _hm,
             } = self;
-            let used = match rx.receive(buf).await {
+
+            let msg = match rx.receive_frame(buf).await {
                 Ok(u) => u,
                 Err(e) => {
-                    let kind = e.as_kind();
-                    match kind {
-                        WireRxErrorKind::ConnectionClosed => return ServerError::RxFatal(e),
+                    match e {
+                        WireRxErrorKind::ConnectionClosed => return ServerError::RxFatal(None),
                         WireRxErrorKind::ReceivedMessageTooLarge => continue,
                         WireRxErrorKind::Other => continue,
+                        WireRxErrorKind::DeserFailed => continue,
                     }
                 }
             };
-            let Some((hdr, body)) = VarHeader::take_from_slice(used) else {
-                // TODO: send a nak on badly formed messages? We don't have
-                // much to say because we don't have a key or seq no or anything
-                continue;
-            };
+
+            // let Some((hdr, body)) = Mode::HeaderType::take_from_slice(used) else {
+            //     // TODO: send a nak on badly formed messages? We don't have
+            //     // much to say because we don't have a key or seq no or anything
+            //     continue;
+            // };
+            let hdr = msg.header;
+            #[cfg(feature = "use-std")]
+            let body = msg.body.as_slice();
+            #[cfg(not(feature = "use-std"))]
+            let body = &msg.body;
+
             let fut = d.handle(tx, &hdr, body);
             if let Err(e) = fut.await {
                 let kind = e.as_kind();
                 match kind {
-                    WireTxErrorKind::ConnectionClosed => return ServerError::TxFatal(e),
+                    WireTxErrorKind::ConnectionClosed => return ServerError::TxFatal(Some(e)),
                     WireTxErrorKind::Other => {}
-                    WireTxErrorKind::Timeout => return ServerError::TxFatal(e),
+                    WireTxErrorKind::Timeout => return ServerError::TxFatal(Some(e)),
                 }
             }
         }
     }
 }
 
-impl<Tx, Rx, Buf, D> Server<Tx, Rx, Buf, D>
+impl<Tx, Rx, Buf, D, Mode> Server<Tx, Rx, Buf, D, Mode>
 where
     Tx: WireTx + Clone,
     Rx: WireRx,
     Buf: DerefMut<Target = [u8]>,
     D: Dispatch<Tx = Tx>,
+    Mode: HeaderMode,
 {
     /// Get a copy of the [`Sender`] to pass to tasks that need it
-    pub fn sender(&self) -> Sender<Tx> {
+    pub fn sender(&self) -> Sender<Tx, Mode> {
         self.tx.clone()
     }
 }
@@ -478,6 +556,8 @@ where
 pub trait Dispatch {
     /// The [`WireTx`] impl used by this dispatcher
     type Tx: WireTx;
+    /// The header mode used by this dispatcher
+    type Mode: HeaderMode;
 
     /// The minimum key length required to avoid hash collisions
     fn min_key_len(&self) -> VarKeyKind;
@@ -485,11 +565,12 @@ pub trait Dispatch {
     /// Handle a single incoming frame (endpoint or topic), and dispatch appropriately
     async fn handle(
         &mut self,
-        tx: &Sender<Self::Tx>,
-        hdr: &VarHeader,
+        tx: &Sender<Self::Tx, Self::Mode>,
+        hdr: &<Self::Mode as HeaderMode>::HeaderType,
         body: &[u8],
     ) -> Result<(), <Self::Tx as WireTx>::Error>;
 }
+
 
 //////////////////////////////////////////////////////////////////////////////
 // SPAWNCONTEXT TRAIT

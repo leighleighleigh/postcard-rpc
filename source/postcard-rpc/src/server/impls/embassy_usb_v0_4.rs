@@ -1,14 +1,13 @@
 //! Implementation using `embassy-usb` and bulk interfaces
 
 use crate::{
-    header::{VarHeader, VarKey, VarKeyKind, VarSeq},
-    server::{WireRx, WireRxErrorKind, WireSpawn, WireTx, WireTxErrorKind},
+    header::{Header, HeaderMode, Unicast, UnicastHeader, VarHeader, VarKey, VarKeyKind, VarSeq},
+    server::{WireRx, WireRxErrorKind, WireTx, WireTxErrorKind},
     standard_icd::LoggingTopic,
     Topic,
 };
 use core::fmt::Arguments;
 use core::sync::atomic::{AtomicU8, Ordering};
-use embassy_executor::{SpawnError, SpawnToken, Spawner};
 use embassy_futures::select::{select, Either};
 use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
 use embassy_time::Timer;
@@ -43,8 +42,8 @@ impl embassy_usb_0_4::Handler for PoststationHandler {
 
 /// A collection of types and aliases useful for importing the correct types
 pub mod dispatch_impl {
-    pub use super::embassy_spawn as spawn_fn;
     use super::{EUsbWireRx, EUsbWireTx, EUsbWireTxInner, UsbDeviceBuffers};
+    pub use crate::server::impls::embassy_shared::embassy_spawn as spawn_fn;
 
     /// Used for defining the USB interface
     pub const DEVICE_INTERFACE_GUIDS: &[&str] = &["{AFB9A6FB-30BA-44BC-9232-806CFC875321}"];
@@ -62,7 +61,7 @@ pub mod dispatch_impl {
     /// Type alias for `WireRx` impl
     pub type WireRxImpl<D> = super::EUsbWireRx<D>;
     /// Type alias for `WireSpawn` impl
-    pub type WireSpawnImpl = super::EUsbWireSpawn;
+    pub type WireSpawnImpl = crate::server::impls::embassy_shared::EmbassyWireSpawn;
     /// Type alias for the receive buffer
     pub type WireRxBuf = &'static mut [u8];
 
@@ -250,8 +249,13 @@ impl<M: RawMutex + 'static, D: Driver<'static> + 'static> Clone for EUsbWireTx<M
     }
 }
 
+impl<M: RawMutex + 'static, D: Driver<'static> + 'static> HeaderMode for EUsbWireTx<M, D> {
+    type HeaderType = UnicastHeader;
+}
+
 impl<M: RawMutex + 'static, D: Driver<'static> + 'static> WireTx for EUsbWireTx<M, D> {
     type Error = WireTxErrorKind;
+    type Mode = Unicast;
 
     async fn send<T: Serialize + ?Sized>(
         &self,
@@ -539,6 +543,7 @@ pub struct EUsbWireRx<D: Driver<'static>> {
 
 impl<D: Driver<'static>> WireRx for EUsbWireRx<D> {
     type Error = WireRxErrorKind;
+    type Mode = Unicast;
 
     async fn receive<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a mut [u8], Self::Error> {
         let buflen = buf.len();
@@ -582,38 +587,8 @@ impl<D: Driver<'static>> WireRx for EUsbWireRx<D> {
 //////////////////////////////////////////////////////////////////////////////
 // SPAWN
 //////////////////////////////////////////////////////////////////////////////
-
-/// A [`WireSpawn`] impl using the embassy executor
-#[derive(Clone)]
-pub struct EUsbWireSpawn {
-    /// The embassy-executor spawner
-    pub spawner: Spawner,
-}
-
-impl From<Spawner> for EUsbWireSpawn {
-    fn from(value: Spawner) -> Self {
-        Self { spawner: value }
-    }
-}
-
-impl WireSpawn for EUsbWireSpawn {
-    type Error = SpawnError;
-
-    type Info = Spawner;
-
-    fn info(&self) -> &Self::Info {
-        &self.spawner
-    }
-}
-
-/// Attempt to spawn the given token
-pub fn embassy_spawn<Sp, S: Sized>(sp: &Sp, tok: SpawnToken<S>) -> Result<(), Sp::Error>
-where
-    Sp: WireSpawn<Error = SpawnError, Info = Spawner>,
-{
-    let info = sp.info();
-    info.spawn(tok)
-}
+pub use super::embassy_shared::embassy_spawn;
+pub use super::embassy_shared::EmbassyWireSpawn as EUsbWireSpawn;
 
 //////////////////////////////////////////////////////////////////////////////
 // OTHER
@@ -679,7 +654,10 @@ pub mod fake {
         server::{Sender, SpawnContext},
         topics,
     };
-    use crate::{header::VarHeader, Schema};
+    use crate::{
+        header::{Unicast, VarHeader},
+        Schema,
+    };
     use embassy_usb_driver::{Bus, ControlPipe, EndpointIn, EndpointOut};
     use serde::{Deserialize, Serialize};
 
@@ -913,7 +891,7 @@ pub mod fake {
     }
 
     // TODO: How to do module path concat?
-    use crate::server::impls::embassy_usb_v0_3::dispatch_impl::{
+    use crate::server::impls::embassy_usb_v0_4::dispatch_impl::{
         spawn_fn, WireSpawnImpl, WireTxImpl,
     };
 
@@ -921,6 +899,7 @@ pub mod fake {
         app: SingleDispatcher;
         spawn_fn: spawn_fn;
         tx_impl: WireTxImpl<FakeMutex, FakeDriver>;
+        hd_mode: Unicast;
         spawn_impl: WireSpawnImpl;
         context: TestContext;
 
@@ -979,7 +958,7 @@ pub mod fake {
         _context: TestSpawnContext,
         _header: VarHeader,
         _body: EReq,
-        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>>,
+        _sender: Sender<WireTxImpl<FakeMutex, FakeDriver>, Unicast>,
     ) {
         todo!()
     }
